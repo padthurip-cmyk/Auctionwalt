@@ -6,6 +6,14 @@
   directory = "netlify/functions"
   node_bundler = "esbuild"
 
+# Extend function timeout to max (26s free tier, 60s Pro)
+# Large PDFs with Claude API need 15-30 seconds
+[functions."parse-invoice"]
+  external_node_modules = []
+
+[functions."generate-receipt"]
+  external_node_modules = []
+
 [[redirects]]
   from = "/api/*"
   to = "/.netlify/functions/:splat"
