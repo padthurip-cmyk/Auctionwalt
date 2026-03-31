@@ -1,0 +1,79 @@
+:root {
+  --bg-app: #0B1120;
+  --bg-card: #0F172A;
+  --bg-surface: #1E293B;
+  --bg-input: #0F172A;
+  --border: #1E293B;
+  --border-hover: #334155;
+  --text-primary: #E2E8F0;
+  --text-secondary: #94A3B8;
+  --text-muted: #64748B;
+  --text-hint: #475569;
+  --accent: #F59E0B;
+  --accent-dim: rgba(245,158,11,0.15);
+  --green: #10B981;
+  --red: #EF4444;
+  --blue: #3B82F6;
+  --font-sans: 'DM Sans', -apple-system, BlinkMacSystemFont, sans-serif;
+  --font-mono: 'JetBrains Mono', 'SF Mono', monospace;
+  --font-display: 'Space Mono', monospace;
+  --radius: 12px;
+  --radius-sm: 8px;
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+  --safe-top: env(safe-area-inset-top, 0px);
+  --nav-height: 64px;
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+html { height: 100%; overflow: hidden; }
+body {
+  font-family: var(--font-sans);
+  background: var(--bg-app);
+  color: var(--text-primary);
+  height: 100%;
+  overflow: hidden;
+  overscroll-behavior: none;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+#root { height: 100%; display: flex; flex-direction: column; }
+
+/* Scrollbar */
+::-webkit-scrollbar { width: 4px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border-hover); border-radius: 4px; }
+
+/* Animations */
+@keyframes spin { to { transform: rotate(360deg); } }
+@keyframes fadeIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+@keyframes slideUp { from { opacity: 0; transform: translateY(100%); } to { opacity: 1; transform: translateY(0); } }
+@keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .5; } }
+
+.fade-in { animation: fadeIn .3s ease-out; }
+.slide-up { animation: slideUp .3s cubic-bezier(.32,.72,0,1); }
+
+/* Touch feel */
+button, label[role="button"], .touchable { 
+  cursor: pointer; 
+  transition: transform .1s, opacity .1s;
+  -webkit-user-select: none;
+  user-select: none;
+}
+button:active, label[role="button"]:active, .touchable:active { 
+  transform: scale(0.97); 
+  opacity: 0.85; 
+}
+
+/* Input focus */
+input:focus, textarea:focus, select:focus {
+  outline: none;
+  border-color: var(--accent) !important;
+  box-shadow: 0 0 0 2px rgba(245,158,11,0.2);
+}
+
+/* Pull-to-refresh prevention */
+body { overscroll-behavior-y: contain; }
+
+/* Status bar padding for notch phones */
+.safe-top { padding-top: var(--safe-top); }
+.safe-bottom { padding-bottom: calc(var(--nav-height) + var(--safe-bottom) + 8px); }
