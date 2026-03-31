@@ -1,65 +1,43 @@
-// All API calls go through Netlify Functions (server-side proxy)
-// Your ANTHROPIC_API_KEY is safe on the server
+// All API calls go through Netlify Functions
 
 export async function parseInvoiceAI(base64, fileType) {
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 60000); // 60s max wait
-
+  const timeout = setTimeout(() => controller.abort(), 60000);
   try {
-    const r = await fetch('/api/parse-invoice', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ base64, fileType }),
-      signal: controller.signal,
-    });
-
-    clearTimeout(timeout);
-    const data = await r.json();
-
-    if (!r.ok || data.error) {
-      throw new Error(data.error || `Server error ${r.status}`);
-    }
-
+    const r = await fetch('/api/parse-invoice', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ base64, fileType }), signal: controller.signal });
+    clearTimeout(timeout); const data = await r.json();
+    if (!r.ok || data.error) throw new Error(data.error || `Server error ${r.status}`);
     return data;
-  } catch (err) {
-    clearTimeout(timeout);
-    if (err.name === 'AbortError') {
-      throw new Error('Invoice took too long to process. Try a clearer photo or smaller PDF.');
-    }
-    throw err;
-  }
+  } catch (err) { clearTimeout(timeout); if (err.name === 'AbortError') throw new Error('Invoice took too long. Try a clearer image.'); throw err; }
 }
 
 export async function generateReceiptAI(soldItem, bizInfo, customerInfo) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 45000);
-
   try {
-    const r = await fetch('/api/generate-receipt', {
+    const r = await fetch('/api/generate-receipt', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ soldItem, bizInfo, customerInfo }), signal: controller.signal });
+    clearTimeout(timeout); const data = await r.json();
+    if (!r.ok || data.error) throw new Error(data.error || `Server error ${r.status}`);
+    return data.html;
+  } catch (err) { clearTimeout(timeout); if (err.name === 'AbortError') throw new Error('Timed out. Try again.'); throw err; }
+}
+
+export async function generateBillAI({ billNumber, items, buyer, seller, billStatus, taxRate, date }) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 50000);
+  try {
+    const r = await fetch('/api/generate-bill', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ soldItem, bizInfo, customerInfo }),
+      body: JSON.stringify({ billNumber, items, buyer, seller, billStatus, taxRate, date }),
       signal: controller.signal,
     });
-
-    clearTimeout(timeout);
-    const data = await r.json();
-
-    if (!r.ok || data.error) {
-      throw new Error(data.error || `Server error ${r.status}`);
-    }
-
-    return data.html;
-  } catch (err) {
-    clearTimeout(timeout);
-    if (err.name === 'AbortError') {
-      throw new Error('Receipt generation timed out. Try again.');
-    }
-    throw err;
-  }
+    clearTimeout(timeout); const data = await r.json();
+    if (!r.ok || data.error) throw new Error(data.error || `Server error ${r.status}`);
+    return data; // { html, subtotal, taxAmount, grandTotal }
+  } catch (err) { clearTimeout(timeout); if (err.name === 'AbortError') throw new Error('Bill generation timed out. Try again.'); throw err; }
 }
 
 export function sendEmailFallback(to, subject, body) {
-  const url = `mailto:${encodeURIComponent(to)}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
-  window.open(url, '_blank');
+  window.open(`mailto:${encodeURIComponent(to)}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`, '_blank');
 }
