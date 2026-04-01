@@ -26,16 +26,22 @@ export async function generateBillAI({ billNumber, items, buyer, seller, billSta
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 50000);
   try {
-    const r = await fetch('/api/generate-bill', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ billNumber, items, buyer, seller, billStatus, taxRate, date }),
-      signal: controller.signal,
-    });
+    const r = await fetch('/api/generate-bill', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ billNumber, items, buyer, seller, billStatus, taxRate, date }), signal: controller.signal });
     clearTimeout(timeout); const data = await r.json();
     if (!r.ok || data.error) throw new Error(data.error || `Server error ${r.status}`);
-    return data; // { html, subtotal, taxAmount, grandTotal }
-  } catch (err) { clearTimeout(timeout); if (err.name === 'AbortError') throw new Error('Bill generation timed out. Try again.'); throw err; }
+    return data;
+  } catch (err) { clearTimeout(timeout); if (err.name === 'AbortError') throw new Error('Bill generation timed out.'); throw err; }
+}
+
+export async function extractListing(url) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 15000);
+  try {
+    const r = await fetch('/api/extract-listing', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ url }), signal: controller.signal });
+    clearTimeout(timeout); const data = await r.json();
+    if (data.error && !data.title && !data.image && !data.price) throw new Error(data.error);
+    return data;
+  } catch (err) { clearTimeout(timeout); if (err.name === 'AbortError') throw new Error('Extraction timed out.'); throw err; }
 }
 
 export function sendEmailFallback(to, subject, body) {
