@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import * as db from './utils/db';
-import { parseInvoiceAI, generateReceiptAI, generateBillAI, sendEmailFallback } from './utils/api';
+import { parseInvoiceAI, generateReceiptAI, generateBillAI, extractListing, sendEmailFallback } from './utils/api';
 import { uid, fmt, fmtDate, fmtTs, readFileAsBase64, openWhatsApp, openSMS, printHTML, buildReceiptText } from './utils/helpers';
 
 const TABS = [
@@ -59,14 +59,16 @@ export default function App() {
   const [lcEvents, setLcEvents] = useState([]);
   const [itemPhotos, setItemPhotos] = useState({});
   const [itemNotes, setItemNotes] = useState([]);
-  const [sf, setSf] = useState({ amount: '', platform: '', buyer: '', buyerEmail: '', buyerPhone: '', billStatus: 'paid' });
+  const [sf, setSf] = useState({ amount: '', platform: '', buyer: '', buyerEmail: '', buyerPhone: '', billStatus: 'paid', includeHst: true, listingUrl: '' });
+  const [extractBusy, setExtractBusy] = useState(false);
+  const [extractData, setExtractData] = useState(null);
   const [noteForm, setNoteForm] = useState({ category: 'product_defect', note: '' });
   const [billItems, setBillItems] = useState([]);
   const [billSearch, setBillSearch] = useState('');
   const fileRef = useRef(null);
 
   const notify = useCallback((t, m) => { setToast({ t, m }); setTimeout(() => setToast(null), 4000); }, []);
-  const closeModal = () => { setModal(null); setReceiptHtml(''); setBillHtml(''); setViewInvUrl(null); setInvDetailItems([]); setInvDetailTab('items'); setLcEvents([]); setEmailTo(''); setBillItems([]); setBillSearch(''); setItemNotes([]); setNoteForm({ category: 'product_defect', note: '' }); setSf({ amount: '', platform: '', buyer: '', buyerEmail: '', buyerPhone: '', billStatus: 'paid' }); };
+  const closeModal = () => { setModal(null); setReceiptHtml(''); setBillHtml(''); setViewInvUrl(null); setInvDetailItems([]); setInvDetailTab('items'); setLcEvents([]); setEmailTo(''); setBillItems([]); setBillSearch(''); setItemNotes([]); setNoteForm({ category: 'product_defect', note: '' }); setSf({ amount: '', platform: '', buyer: '', buyerEmail: '', buyerPhone: '', billStatus: 'paid', includeHst: true, listingUrl: '' }); setExtractBusy(false); setExtractData(null); };
 
   // Auth
   useEffect(() => {
@@ -119,7 +121,26 @@ export default function App() {
   // Item actions
   const setItemPurpose = useCallback(async (item, p) => { await db.updateItem(item.id, { purpose: p }); await db.addLifecycleEvent({ item_id: item.id, event: p === 'personal' ? 'Personal' : 'For Sale' }); await load(); notify('ok', p === 'personal' ? 'Personal' : 'For sale'); }, [load, notify]);
   const setListingStatus = useCallback(async (item, st, platform, price) => { const u = { listing_status: st }; if (platform) u.listing_platform = platform; if (price) u.listing_price = price; if (st === 'live_listed') u.listed_at = new Date().toISOString(); await db.updateItem(item.id, u); await db.addLifecycleEvent({ item_id: item.id, event: st === 'live_listed' ? 'Listed Live' : st === 'pending_list' ? 'Pending List' : 'Unlisted', detail: platform || '' }); await load(); notify('ok', st === 'live_listed' ? 'Listed' : st === 'pending_list' ? 'Pending' : 'Unlisted'); }, [load, notify]);
-  const handlePhoto = useCallback(async (id, e) => { const files = Array.from(e.target.files || []); if (!files.length) return; for (const f of files) { await db.uploadPhoto(id, f); } await loadPhotos(id); notify('ok', 'Uploaded'); }, [notify, loadPhotos]);
+  const handlePhoto = useCallback(async (id, e) => {
+    const files = Array.from(e.target.files || []); if (!files.length) return;
+    // Instant local preview — show blob URLs immediately
+    const previews = files.map(f => ({ id: 'temp_' + Date.now() + Math.random(), url: URL.createObjectURL(f), file_name: f.name, file_path: null, _uploading: true }));
+    setItemPhotos(prev => ({ ...prev, [id]: [...(prev[id] || []), ...previews] }));
+    // Upload in background, replace previews with real URLs
+    for (let idx = 0; idx < files.length; idx++) {
+      try {
+        const { record } = await db.uploadPhoto(id, files[idx]);
+        const { data: u } = await (await import('./utils/supabase')).supabase.storage.from('product-photos').createSignedUrl(record.file_path, 3600);
+        setItemPhotos(prev => {
+          const arr = [...(prev[id] || [])];
+          const pi = arr.findIndex(p => p.id === previews[idx].id);
+          if (pi >= 0) arr[pi] = { ...record, url: u?.signedUrl };
+          return { ...prev, [id]: arr };
+        });
+      } catch (err) { console.error('Upload error:', err); }
+    }
+    notify('ok', `${files.length} photo(s) saved`);
+  }, [notify]);
   const handleDeletePhoto = useCallback(async (itemId, photo) => { if (!confirm('Delete photo?')) return; await db.deletePhoto(photo.id, photo.file_path); await loadPhotos(itemId); notify('ok', 'Deleted'); }, [loadPhotos, notify]);
 
   // ─── Notes ───
@@ -165,7 +186,7 @@ export default function App() {
     notify('info', 'Generating Bill...');
     try {
       const seller = { name: biz.business_name, address: biz.address, phone: biz.phone, email: biz.email, hst: biz.hst };
-      const result = await generateBillAI({ billNumber: rcpt, items: [{ title: item.title, lot_number: item.lot_number, quantity: item.quantity || 1, price: amt }], buyer: { name: lsf.buyer || 'Walk-in', email: lsf.buyerEmail, phone: lsf.buyerPhone }, seller, billStatus: lsf.billStatus, taxRate: 0.13, date: new Date().toISOString() });
+      const result = await generateBillAI({ billNumber: rcpt, items: [{ title: item.title, lot_number: item.lot_number, quantity: item.quantity || 1, price: amt }], buyer: { name: lsf.buyer || 'Walk-in', email: lsf.buyerEmail, phone: lsf.buyerPhone }, seller, billStatus: lsf.billStatus, taxRate: lsf.includeHst ? 0.13 : 0, date: new Date().toISOString() });
       await db.updateSoldItem(si.id, { receipt_html: result.html }); setBillHtml(result.html); await load();
       setModal({ type: 'billPreview', data: { ...si, receipt_html: result.html, sold_buyer: lsf.buyer, sold_buyer_email: lsf.buyerEmail, sold_buyer_phone: lsf.buyerPhone, receipt_number: rcpt, bill_status: lsf.billStatus } });
       notify('ok', `Bill #${rcpt}`);
@@ -186,7 +207,7 @@ export default function App() {
     if (lsf.buyer && !customers.find(c => c.name === lsf.buyer)) await db.insertCustomer({ name: lsf.buyer, email: lsf.buyerEmail, phone: lsf.buyerPhone });
     await load(); closeModal(); notify('info', 'Generating Bill...'); setBillBusy(true);
     try {
-      const result = await generateBillAI({ billNumber: rcpt, items: lbi.map(bi => ({ title: bi.title, lot_number: bi.lot_number, quantity: bi.quantity || 1, price: parseFloat(bi.sellPrice) || 0 })), buyer: { name: lsf.buyer, email: lsf.buyerEmail, phone: lsf.buyerPhone }, seller: { name: biz.business_name, address: biz.address, phone: biz.phone, email: biz.email, hst: biz.hst }, billStatus: lsf.billStatus, taxRate: 0.13, date: new Date().toISOString() });
+      const result = await generateBillAI({ billNumber: rcpt, items: lbi.map(bi => ({ title: bi.title, lot_number: bi.lot_number, quantity: bi.quantity || 1, price: parseFloat(bi.sellPrice) || 0 })), buyer: { name: lsf.buyer, email: lsf.buyerEmail, phone: lsf.buyerPhone }, seller: { name: biz.business_name, address: biz.address, phone: biz.phone, email: biz.email, hst: biz.hst }, billStatus: lsf.billStatus, taxRate: lsf.includeHst ? 0.13 : 0, date: new Date().toISOString() });
       if (soldIds[0]) await db.updateSoldItem(soldIds[0].id, { receipt_html: result.html });
       setBillHtml(result.html); setBillBusy(false); await load();
       setModal({ type: 'billPreview', data: { receipt_number: rcpt, receipt_html: result.html, sold_buyer: lsf.buyer, sold_buyer_email: lsf.buyerEmail, sold_buyer_phone: lsf.buyerPhone, bill_status: lsf.billStatus, sold_price: lbi.reduce((s, i) => s + (parseFloat(i.sellPrice) || 0), 0) } });
@@ -253,6 +274,15 @@ export default function App() {
             <Stat label="Revenue" value={fmt(totalRev)} sub={`${sold.length} sold`} color="var(--green)" />
             <Stat label="Profit" value={`${totalProfit >= 0 ? '+' : ''}${fmt(totalProfit)}`} sub={totalSpent > 0 ? `${((totalProfit / totalSpent) * 100).toFixed(0)}% ROI` : '—'} color={totalProfit >= 0 ? 'var(--green)' : 'var(--red)'} />
           </div>
+          {/* Detailed breakdown */}
+          {items.length > 0 && <div style={{...S.sumBar, marginBottom: 14}}>
+            <div style={S.sumItem}><span style={S.sumL}>For Sale</span><span style={S.sumV}>{items.filter(i=>(i.purpose||'for_sale')==='for_sale').length} · {fmt(items.filter(i=>(i.purpose||'for_sale')==='for_sale').reduce((s,i)=>s+parseFloat(i.total_cost||0),0))}</span></div>
+            {personalItems.length > 0 && <div style={S.sumItem}><span style={S.sumL}>Personal</span><span style={S.sumV}>{personalItems.length} · {fmt(personalItems.reduce((s,i)=>s+parseFloat(i.total_cost||0),0))}</span></div>}
+            {listedItems.length > 0 && <div style={S.sumItem}><span style={S.sumL}>Listed</span><span style={{...S.sumV,color:'var(--green)'}}>{listedItems.length} · {fmt(listedItems.reduce((s,i)=>s+parseFloat(i.listing_price||i.total_cost||0),0))}</span></div>}
+            {pendingItems.length > 0 && <div style={S.sumItem}><span style={S.sumL}>Pending</span><span style={S.sumV}>{pendingItems.length}</span></div>}
+            {dueBills.length > 0 && <div style={S.sumItem}><span style={S.sumL}>Due</span><span style={{...S.sumV,color:'var(--red)'}}>{dueBills.length} · {fmt(dueBills.reduce((s,i)=>s+parseFloat(i.sold_price||0),0))}</span></div>}
+            {openNotes.length > 0 && <div style={S.sumItem}><span style={S.sumL}>Issues</span><span style={{...S.sumV,color:'#B45309'}}>{openNotes.length}</span></div>}
+          </div>}
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginBottom: 16 }}>
             <label role="button" style={S.actC}><input ref={fileRef} type="file" accept=".pdf,.png,.jpg,.jpeg,.webp" onChange={handleUpload} style={{ display: 'none' }} /><span style={{ fontSize: 24 }}>📄</span><span style={{ fontSize: 13, fontWeight: 600 }}>Upload Invoice</span></label>
             <div style={S.actC} onClick={() => { setTab('sales'); setSaleFilter('New Bill'); setModal({ type: 'billOfSale' }); }}><span style={{ fontSize: 24 }}>🧾</span><span style={{ fontSize: 13, fontWeight: 600 }}>Bill of Sale</span></div>
@@ -268,6 +298,8 @@ export default function App() {
         {tab === 'inventory' && <div>
           <div style={S.ph}><h1 style={{ fontSize: 22, fontWeight: 700 }}>Inventory</h1><p style={{ fontSize: 13, color: 'var(--text-secondary)' }}>{items.length} items · {fmt(invValue)}</p></div>
           <div style={S.fRow}>{INV_FILTERS.map(f => <button key={f} style={{ ...S.fBtn, ...(invFilter === f ? S.fAct : {}) }} onClick={() => setInvFilter(f)}>{f}</button>)}</div>
+          {/* Summary bar for current filter */}
+          {(() => { const fi = filteredInv(); const tv = fi.reduce((s,i) => s + parseFloat(i.total_cost||0), 0); const hv = fi.reduce((s,i) => s + parseFloat(i.hammer_price||0), 0); return fi.length > 0 && <div style={S.sumBar}><div style={S.sumItem}><span style={S.sumL}>{fi.length} items</span></div><div style={S.sumItem}><span style={S.sumL}>Hammer</span><span style={S.sumV}>{fmt(hv)}</span></div><div style={S.sumItem}><span style={S.sumL}>Total Cost</span><span style={{...S.sumV,color:'var(--accent)'}}>{fmt(tv)}</span></div></div>; })()}
           <input style={{ ...S.input, marginBottom: 10 }} placeholder="Search..." value={search} onChange={e => setSearch(e.target.value)} />
           {filteredInv().length === 0 ? <Empty text="No items" /> : filteredInv().map((item, i) => {
             const photos = itemPhotos[item.id] || [];
@@ -284,7 +316,7 @@ export default function App() {
                   </div>
                   <p style={S.cT}>{item.title}</p><p style={S.cS}>{item.auction_house} · Lot #{item.lot_number}</p>
                 </div>
-                <div style={{ textAlign: 'right', flexShrink: 0 }}><p style={{ fontSize: 15, fontWeight: 700, color: 'var(--accent)' }}>{fmt(item.total_cost)}</p>{item.listing_price && <p style={{ fontSize: 11, color: 'var(--green)' }}>Ask {fmt(item.listing_price)}</p>}</div>
+                <div style={{ textAlign: 'right', flexShrink: 0 }}><p style={{ fontSize: 15, fontWeight: 700, color: 'var(--accent)' }}>{fmt(item.total_cost)}</p>{item.listing_price && <p style={{ fontSize: 11, color: 'var(--green)' }}>Ask {fmt(item.listing_price)}</p>}{item.listing_url && <a href={item.listing_url} target="_blank" rel="noopener noreferrer" onClick={e => e.stopPropagation()} style={{ fontSize: 10, color: 'var(--blue)', textDecoration: 'none', display: 'block', marginTop: 2 }}>🔗 View Listing</a>}</div>
               </div>
               <div style={S.acts}>
                 <button style={S.chip} onClick={() => { setModal({ type: 'photos', data: item }); loadPhotos(item.id); }}>📷</button>
@@ -300,9 +332,9 @@ export default function App() {
         {tab === 'sales' && <div>
           <div style={S.ph}><h1 style={{ fontSize: 22, fontWeight: 700 }}>Sales</h1><p style={{ fontSize: 13, color: 'var(--text-secondary)' }}>{fmt(totalRev)} revenue · <span style={{ color: totalProfit >= 0 ? 'var(--green)' : 'var(--red)' }}>{totalProfit >= 0 ? '+' : ''}{fmt(totalProfit)}</span></p></div>
           <div style={S.fRow}>{SALE_FILTERS.map(f => <button key={f} style={{ ...S.fBtn, ...(saleFilter === f ? S.fAct : {}) }} onClick={() => setSaleFilter(f)}>{f}{f === 'Due' && dueBills.length ? ` (${dueBills.length})` : ''}</button>)}</div>
-          {saleFilter === 'New Bill' && <div><button style={{ ...S.btnP, width: '100%', marginBottom: 16 }} onClick={() => setModal({ type: 'billOfSale' })}>🧾 Create Bill of Sale</button>{sold.map((si, i) => <SC key={si.id} si={si} i={i} onBill={() => viewBill(si)} onShare={() => setModal({ type: 'share', data: si })} onLC={() => handleLC(si, true)} onNote={() => { setModal({ type: 'notes', data: si, isSold: true }); loadItemNotes(null, si.id); }} onMarkPaid={si.bill_status === 'due' ? () => markBillPaid(si) : null} noteCount={allNotes.filter(n => n.sold_item_id === si.id && !n.is_resolved).length} />)}</div>}
-          {saleFilter === 'Due' && <div>{dueBills.length === 0 ? <Empty text="No unpaid" /> : dueBills.map((si, i) => <SC key={si.id} si={si} i={i} onBill={() => viewBill(si)} onShare={() => setModal({ type: 'share', data: si })} onLC={() => handleLC(si, true)} onNote={() => { setModal({ type: 'notes', data: si, isSold: true }); loadItemNotes(null, si.id); }} onMarkPaid={() => markBillPaid(si)} noteCount={allNotes.filter(n => n.sold_item_id === si.id && !n.is_resolved).length} />)}</div>}
-          {saleFilter === 'Closed' && <div>{closedBills.length === 0 ? <Empty text="No closed" /> : <>{closedBills.map((si, i) => <SC key={si.id} si={si} i={i} onBill={() => viewBill(si)} onShare={() => setModal({ type: 'share', data: si })} onLC={() => handleLC(si, true)} onNote={() => { setModal({ type: 'notes', data: si, isSold: true }); loadItemNotes(null, si.id); }} noteCount={allNotes.filter(n => n.sold_item_id === si.id && !n.is_resolved).length} />)}</>}</div>}
+          {saleFilter === 'New Bill' && <div><button style={{ ...S.btnP, width: '100%', marginBottom: 12 }} onClick={() => setModal({ type: 'billOfSale' })}>🧾 Create Bill of Sale</button>{sold.length > 0 && <div style={S.sumBar}><div style={S.sumItem}><span style={S.sumL}>{sold.length} sales</span></div><div style={S.sumItem}><span style={S.sumL}>Cost</span><span style={S.sumV}>{fmt(sold.reduce((s,i)=>s+parseFloat(i.total_cost||0),0))}</span></div><div style={S.sumItem}><span style={S.sumL}>Revenue</span><span style={S.sumV}>{fmt(totalRev)}</span></div><div style={S.sumItem}><span style={S.sumL}>Profit</span><span style={{...S.sumV,color:totalProfit>=0?'var(--green)':'var(--red)'}}>{totalProfit>=0?'+':''}{fmt(totalProfit)}</span></div></div>}{sold.map((si, i) => <SC key={si.id} si={si} i={i} onBill={() => viewBill(si)} onShare={() => setModal({ type: 'share', data: si })} onLC={() => handleLC(si, true)} onNote={() => { setModal({ type: 'notes', data: si, isSold: true }); loadItemNotes(null, si.id); }} onMarkPaid={si.bill_status === 'due' ? () => markBillPaid(si) : null} noteCount={allNotes.filter(n => n.sold_item_id === si.id && !n.is_resolved).length} />)}</div>}
+          {saleFilter === 'Due' && <div>{dueBills.length === 0 ? <Empty text="No unpaid" /> : <>{(() => { const dueTotal = dueBills.reduce((s,i)=>s+parseFloat(i.sold_price||0),0); const dueCost = dueBills.reduce((s,i)=>s+parseFloat(i.total_cost||0),0); return <div style={{...S.sumBar, borderLeft:'3px solid var(--red)'}}><div style={S.sumItem}><span style={S.sumL}>{dueBills.length} unpaid</span></div><div style={S.sumItem}><span style={S.sumL}>Outstanding</span><span style={{...S.sumV,color:'var(--red)'}}>{fmt(dueTotal)}</span></div><div style={S.sumItem}><span style={S.sumL}>Your Cost</span><span style={S.sumV}>{fmt(dueCost)}</span></div></div>; })()}{dueBills.map((si, i) => <SC key={si.id} si={si} i={i} onBill={() => viewBill(si)} onShare={() => setModal({ type: 'share', data: si })} onLC={() => handleLC(si, true)} onNote={() => { setModal({ type: 'notes', data: si, isSold: true }); loadItemNotes(null, si.id); }} onMarkPaid={() => markBillPaid(si)} noteCount={allNotes.filter(n => n.sold_item_id === si.id && !n.is_resolved).length} />)}</>}</div>}
+          {saleFilter === 'Closed' && <div>{closedBills.length === 0 ? <Empty text="No closed" /> : <>{(() => { const cRev = closedBills.reduce((s,i)=>s+parseFloat(i.sold_price||0),0); const cCost = closedBills.reduce((s,i)=>s+parseFloat(i.total_cost||0),0); const cProfit = closedBills.reduce((s,i)=>s+parseFloat(i.profit||0),0); return <div style={{...S.sumBar, borderLeft:'3px solid var(--green)'}}><div style={S.sumItem}><span style={S.sumL}>{closedBills.length} closed</span></div><div style={S.sumItem}><span style={S.sumL}>Cost</span><span style={S.sumV}>{fmt(cCost)}</span></div><div style={S.sumItem}><span style={S.sumL}>Revenue</span><span style={S.sumV}>{fmt(cRev)}</span></div><div style={S.sumItem}><span style={S.sumL}>Profit</span><span style={{...S.sumV,color:'var(--green)'}}>+{fmt(cProfit)}</span></div></div>; })()}{closedBills.map((si, i) => <SC key={si.id} si={si} i={i} onBill={() => viewBill(si)} onShare={() => setModal({ type: 'share', data: si })} onLC={() => handleLC(si, true)} onNote={() => { setModal({ type: 'notes', data: si, isSold: true }); loadItemNotes(null, si.id); }} noteCount={allNotes.filter(n => n.sold_item_id === si.id && !n.is_resolved).length} />)}</>}</div>}
         </div>}
 
         {/* ═══ ISSUES DASHBOARD ═══ */}
@@ -310,6 +342,22 @@ export default function App() {
           <div style={S.ph}><h1 style={{ fontSize: 22, fontWeight: 700 }}>Issues & Notes</h1><p style={{ fontSize: 13, color: 'var(--text-secondary)' }}>{openNotes.length} open · {resolvedNotes.length} resolved</p></div>
 
           <div style={S.fRow}>{ISSUE_FILTERS.map(f => <button key={f} style={{ ...S.fBtn, ...(issueFilter === f ? S.fAct : {}) }} onClick={() => setIssueFilter(f)}>{f}{f === 'Open' && openNotes.length ? ` (${openNotes.length})` : ''}</button>)}</div>
+
+          {/* Issues value summary */}
+          {(() => {
+            const notes = issueFilter === 'Open' ? openNotes : issueFilter === 'Resolved' ? resolvedNotes : allNotes;
+            if (notes.length === 0) return null;
+            const affectedItemIds = [...new Set(notes.map(n => n.item_id).filter(Boolean))];
+            const affectedSoldIds = [...new Set(notes.map(n => n.sold_item_id).filter(Boolean))];
+            const invVal = affectedItemIds.reduce((s, id) => { const it = items.find(i => i.id === id); return s + parseFloat(it?.total_cost || 0); }, 0);
+            const soldVal = affectedSoldIds.reduce((s, id) => { const si = sold.find(i => i.id === id); return s + parseFloat(si?.sold_price || 0); }, 0);
+            return <div style={{...S.sumBar, borderLeft:'3px solid #F59E0B', marginBottom: 10}}>
+              <div style={S.sumItem}><span style={S.sumL}>{notes.length} notes</span></div>
+              <div style={S.sumItem}><span style={S.sumL}>Items affected</span><span style={S.sumV}>{affectedItemIds.length + affectedSoldIds.length}</span></div>
+              {invVal > 0 && <div style={S.sumItem}><span style={S.sumL}>Inventory at risk</span><span style={{...S.sumV, color:'#B45309'}}>{fmt(invVal)}</span></div>}
+              {soldVal > 0 && <div style={S.sumItem}><span style={S.sumL}>Sold value</span><span style={S.sumV}>{fmt(soldVal)}</span></div>}
+            </div>;
+          })()}
 
           {/* Category summary (open only) */}
           {issueFilter === 'Open' && openNotes.length > 0 && <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 12 }}>
@@ -436,7 +484,56 @@ export default function App() {
       </OL>}
 
       {/* GO LIVE */}
-      {modal?.type === 'goLive' && <OL close={closeModal}><h3 style={S.mT}>List Live</h3><Lbl t="Platform" /><input style={S.input} placeholder="Facebook, Kijiji..." value={sf.platform} onChange={e => setSf({ ...sf, platform: e.target.value })} /><Lbl t="Asking Price" /><input style={S.input} type="number" step="0.01" value={sf.amount} onChange={e => setSf({ ...sf, amount: e.target.value })} /><button style={{ ...S.btnP, width: '100%', marginTop: 14 }} onClick={() => { setListingStatus(modal.data, 'live_listed', sf.platform, parseFloat(sf.amount) || null); closeModal(); }}>🟢 Go Live</button></OL>}
+      {modal?.type === 'goLive' && <OL close={closeModal}>
+        <h3 style={S.mT}>List Live — {modal.data.title}</h3>
+
+        {/* URL + Extract */}
+        <Lbl t="Listing URL" />
+        <div style={{ display: 'flex', gap: 6 }}>
+          <input style={{ ...S.input, flex: 1 }} type="url" placeholder="https://facebook.com/marketplace/..." value={sf.listingUrl} onChange={e => { setSf({ ...sf, listingUrl: e.target.value }); setExtractData(null); }} />
+          <button style={{ ...S.btnP, padding: '10px 14px', fontSize: 13, flexShrink: 0, opacity: (!sf.listingUrl || extractBusy) ? 0.5 : 1 }} disabled={!sf.listingUrl || extractBusy} onClick={async () => {
+            setExtractBusy(true); setExtractData(null);
+            try {
+              const data = await extractListing(sf.listingUrl);
+              setExtractData(data);
+              // Auto-fill fields from extracted data
+              if (data.price && !sf.amount) setSf(prev => ({ ...prev, amount: String(data.price) }));
+              if (data.siteName && !sf.platform) {
+                const site = data.siteName.toLowerCase();
+                const platform = site.includes('facebook') ? 'Facebook Marketplace' : site.includes('kijiji') ? 'Kijiji' : site.includes('ebay') ? 'eBay' : data.siteName;
+                setSf(prev => ({ ...prev, platform }));
+              }
+              notify('ok', 'Extracted listing data!');
+            } catch (err) { notify('err', err.message); }
+            setExtractBusy(false);
+          }}>{extractBusy ? '...' : '🔍 Extract'}</button>
+        </div>
+        <p style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 2 }}>Paste link & tap Extract to auto-fill price, platform & images</p>
+
+        {/* Extracted preview */}
+        {extractData && !extractData.error && <div style={{ background: 'var(--bg-surface)', borderRadius: 10, padding: 12, marginTop: 10, marginBottom: 6 }}>
+          <p style={{ fontSize: 11, fontWeight: 600, color: 'var(--green)', marginBottom: 6 }}>✅ Extracted from {extractData.siteName || 'listing'}</p>
+          {extractData.image && <img src={extractData.image} alt="" style={{ width: '100%', height: 140, objectFit: 'cover', borderRadius: 8, marginBottom: 8 }} onError={e => { e.target.style.display = 'none'; }} />}
+          {extractData.title && <p style={{ fontSize: 14, fontWeight: 600, marginBottom: 2 }}>{extractData.title}</p>}
+          {extractData.description && <p style={{ fontSize: 12, color: 'var(--text-secondary)', marginBottom: 4, lineHeight: 1.3 }}>{extractData.description.slice(0, 150)}{extractData.description.length > 150 ? '...' : ''}</p>}
+          {extractData.price && <p style={{ fontSize: 16, fontWeight: 700, color: 'var(--accent)' }}>${extractData.price.toFixed(2)} {extractData.currency}</p>}
+          {/* Save extracted images to item */}
+          {extractData.images && extractData.images.length > 1 && <p style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 4 }}>{extractData.images.length} images found</p>}
+        </div>}
+        {extractData?.error && <p style={{ fontSize: 12, color: 'var(--red)', marginTop: 6 }}>{extractData.error}</p>}
+
+        <Lbl t="Platform" /><input style={S.input} placeholder="Facebook, Kijiji, eBay..." value={sf.platform} onChange={e => setSf({ ...sf, platform: e.target.value })} />
+        <Lbl t="Asking Price" /><input style={S.input} type="number" step="0.01" placeholder="0.00" value={sf.amount} onChange={e => setSf({ ...sf, amount: e.target.value })} />
+
+        <button style={{ ...S.btnP, width: '100%', marginTop: 14 }} onClick={async () => {
+          const updates = { listing_status: 'live_listed', listing_platform: sf.platform, listed_at: new Date().toISOString() };
+          if (sf.amount) updates.listing_price = parseFloat(sf.amount);
+          if (sf.listingUrl) updates.listing_url = sf.listingUrl;
+          await db.updateItem(modal.data.id, updates);
+          await db.addLifecycleEvent({ item_id: modal.data.id, event: 'Listed Live', detail: `${sf.platform || ''}${sf.amount ? ' · $' + sf.amount : ''}${sf.listingUrl ? ' · ' + sf.listingUrl : ''}` });
+          await load(); closeModal(); notify('ok', 'Listed Live!');
+        }}>🟢 Go Live</button>
+      </OL>}
 
       {/* SELL */}
       {modal?.type === 'sell' && <OL close={closeModal}>
@@ -447,7 +544,12 @@ export default function App() {
         <Lbl t="Email" /><input style={S.input} type="email" value={sf.buyerEmail} onChange={e => setSf({ ...sf, buyerEmail: e.target.value })} />
         <Lbl t="Phone" /><input style={S.input} type="tel" value={sf.buyerPhone} onChange={e => setSf({ ...sf, buyerPhone: e.target.value })} />
         <Lbl t="Payment" /><div style={{ display: 'flex', gap: 8, marginBottom: 8 }}><button style={{ ...S.togBtn, ...(sf.billStatus === 'paid' ? S.togAct : {}) }} onClick={() => setSf({ ...sf, billStatus: 'paid' })}>✅ Paid</button><button style={{ ...S.togBtn, ...(sf.billStatus === 'due' ? { ...S.togAct, background: 'var(--red-light)', color: 'var(--red)', borderColor: 'var(--red)' } : {}) }} onClick={() => setSf({ ...sf, billStatus: 'due' })}>⏳ Due</button></div>
-        {sf.amount && (() => { const p = parseFloat(sf.amount) - parseFloat(modal.data.total_cost); return <div style={{ display: 'flex', justifyContent: 'space-between', padding: '10px 14px', background: p >= 0 ? 'var(--green-light)' : 'var(--red-light)', borderRadius: 8, marginTop: 6 }}><span>Profit</span><span style={{ fontWeight: 700, color: p >= 0 ? 'var(--green)' : 'var(--red)' }}>{p >= 0 ? '+' : ''}{fmt(p)}</span></div>; })()}
+        {/* HST Toggle */}
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '10px 14px', background: 'var(--bg-surface)', borderRadius: 8, marginBottom: 8 }}>
+          <div><p style={{ fontSize: 14, fontWeight: 500 }}>Include HST (13%)</p><p style={{ fontSize: 11, color: 'var(--text-muted)' }}>Add tax to bill of sale</p></div>
+          <button onClick={() => setSf({ ...sf, includeHst: !sf.includeHst })} style={{ width: 48, height: 28, borderRadius: 14, border: 'none', background: sf.includeHst ? 'var(--green)' : 'var(--border)', position: 'relative', cursor: 'pointer', transition: 'background .2s' }}><div style={{ width: 22, height: 22, borderRadius: 11, background: '#fff', position: 'absolute', top: 3, left: sf.includeHst ? 23 : 3, transition: 'left .2s', boxShadow: '0 1px 3px rgba(0,0,0,.2)' }} /></button>
+        </div>
+        {sf.amount && (() => { const sub = parseFloat(sf.amount); const tax = sf.includeHst ? +(sub * 0.13).toFixed(2) : 0; const total = sub + tax; const p = total - parseFloat(modal.data.total_cost); return <div style={{ borderRadius: 8, marginTop: 6, overflow: 'hidden' }}><div style={{ display: 'flex', justifyContent: 'space-between', padding: '8px 14px', background: 'var(--bg-surface)' }}><span style={{ fontSize: 13 }}>Subtotal</span><span style={{ fontSize: 13, fontWeight: 600 }}>{fmt(sub)}</span></div>{sf.includeHst && <div style={{ display: 'flex', justifyContent: 'space-between', padding: '6px 14px', background: 'var(--bg-surface)' }}><span style={{ fontSize: 13 }}>HST 13%</span><span style={{ fontSize: 13, fontWeight: 600 }}>{fmt(tax)}</span></div>}{sf.includeHst && <div style={{ display: 'flex', justifyContent: 'space-between', padding: '6px 14px', background: 'var(--bg-surface)' }}><span style={{ fontSize: 13, fontWeight: 600 }}>Bill Total</span><span style={{ fontSize: 14, fontWeight: 700, color: 'var(--accent)' }}>{fmt(total)}</span></div>}<div style={{ display: 'flex', justifyContent: 'space-between', padding: '8px 14px', background: p >= 0 ? 'var(--green-light)' : 'var(--red-light)' }}><span style={{ fontSize: 14 }}>Profit</span><span style={{ fontWeight: 700, color: p >= 0 ? 'var(--green)' : 'var(--red)' }}>{p >= 0 ? '+' : ''}{fmt(p)}</span></div></div>; })()}
         <button style={{ ...S.btnP, width: '100%', marginTop: 14 }} onClick={handleSell} disabled={!sf.amount}>Confirm & Generate Bill</button>
       </OL>}
 
@@ -456,11 +558,18 @@ export default function App() {
         <h3 style={S.mT}>Bill of Sale</h3>
         <Lbl t="Search Items" /><input style={S.input} placeholder="Search..." value={billSearch} onChange={e => setBillSearch(e.target.value)} />
         {billSearch && <div style={{ maxHeight: 150, overflow: 'auto', border: '1px solid var(--border)', borderRadius: 8, marginTop: 4, marginBottom: 8 }}>{items.filter(i => i.purpose !== 'personal' && !billItems.find(b => b.id === i.id) && [i.title, i.lot_number].some(f => f?.toLowerCase().includes(billSearch.toLowerCase()))).map(i => <div key={i.id} style={{ padding: '8px 12px', borderBottom: '1px solid var(--border-light)', cursor: 'pointer', display: 'flex', justifyContent: 'space-between' }} onClick={() => { setBillItems(p => [...p, { ...i, sellPrice: '' }]); setBillSearch(''); }}><span style={{ fontSize: 13 }}>{i.title}</span><span style={{ fontSize: 12, color: 'var(--text-muted)' }}>{fmt(i.total_cost)}</span></div>)}</div>}
-        {billItems.length > 0 && <div style={{ marginBottom: 12 }}><p style={{ fontSize: 12, fontWeight: 600, marginBottom: 6 }}>Items ({billItems.length})</p>{billItems.map((bi, idx) => <div key={bi.id} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 0', borderBottom: '1px solid var(--border-light)' }}><div style={{ flex: 1, minWidth: 0 }}><p style={{ fontSize: 13, fontWeight: 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{bi.title}</p><p style={{ fontSize: 11, color: 'var(--text-muted)' }}>{fmt(bi.total_cost)}</p></div><input style={{ ...S.input, width: 90, padding: '6px 8px', textAlign: 'right' }} type="number" step="0.01" placeholder="Price" value={bi.sellPrice} onChange={e => setBillItems(p => p.map((b, i) => i === idx ? { ...b, sellPrice: e.target.value } : b))} /><button style={{ background: 'none', border: 'none', color: 'var(--red)', fontSize: 16 }} onClick={() => setBillItems(p => p.filter((_, i) => i !== idx))}>✕</button></div>)}<div style={{ display: 'flex', justifyContent: 'space-between', padding: '10px 0', fontWeight: 600, fontSize: 15 }}><span>Total</span><span style={{ color: 'var(--accent)' }}>{fmt(billItems.reduce((s, i) => s + (parseFloat(i.sellPrice) || 0), 0))}</span></div></div>}
+        {billItems.length > 0 && <div style={{ marginBottom: 12 }}><p style={{ fontSize: 12, fontWeight: 600, marginBottom: 6 }}>Items ({billItems.length})</p>{billItems.map((bi, idx) => <div key={bi.id} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 0', borderBottom: '1px solid var(--border-light)' }}><div style={{ flex: 1, minWidth: 0 }}><p style={{ fontSize: 13, fontWeight: 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{bi.title}</p><p style={{ fontSize: 11, color: 'var(--text-muted)' }}>{fmt(bi.total_cost)}</p></div><input style={{ ...S.input, width: 100, minWidth: 80, flexShrink: 0, padding: '6px 8px', textAlign: 'right' }} type="number" step="0.01" placeholder="Price" value={bi.sellPrice} onChange={e => setBillItems(p => p.map((b, i) => i === idx ? { ...b, sellPrice: e.target.value } : b))} /><button style={{ background: 'none', border: 'none', color: 'var(--red)', fontSize: 16, flexShrink: 0 }} onClick={() => setBillItems(p => p.filter((_, i) => i !== idx))}>✕</button></div>)}
+          {(() => { const sub = billItems.reduce((s, i) => s + (parseFloat(i.sellPrice) || 0), 0); const tax = sf.includeHst ? +(sub * 0.13).toFixed(2) : 0; return <div style={{ padding: '8px 0' }}><div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 14 }}><span>Subtotal</span><span style={{ fontWeight: 600 }}>{fmt(sub)}</span></div>{sf.includeHst && <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, color: 'var(--text-secondary)' }}><span>HST 13%</span><span>{fmt(tax)}</span></div>}<div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 16, fontWeight: 700, paddingTop: 4 }}><span>Total</span><span style={{ color: 'var(--accent)' }}>{fmt(sub + tax)}</span></div></div>; })()}
+        </div>}
         <Lbl t="Buyer *" /><input style={S.input} value={sf.buyer} onChange={e => setSf({ ...sf, buyer: e.target.value })} />
         <Lbl t="Email" /><input style={S.input} type="email" value={sf.buyerEmail} onChange={e => setSf({ ...sf, buyerEmail: e.target.value })} />
         <Lbl t="Phone" /><input style={S.input} type="tel" value={sf.buyerPhone} onChange={e => setSf({ ...sf, buyerPhone: e.target.value })} />
         <Lbl t="Payment" /><div style={{ display: 'flex', gap: 8, marginBottom: 8 }}><button style={{ ...S.togBtn, ...(sf.billStatus === 'paid' ? S.togAct : {}) }} onClick={() => setSf({ ...sf, billStatus: 'paid' })}>✅ Paid</button><button style={{ ...S.togBtn, ...(sf.billStatus === 'due' ? { ...S.togAct, background: 'var(--red-light)', color: 'var(--red)', borderColor: 'var(--red)' } : {}) }} onClick={() => setSf({ ...sf, billStatus: 'due' })}>⏳ Due</button></div>
+        {/* HST Toggle */}
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '10px 14px', background: 'var(--bg-surface)', borderRadius: 8, marginBottom: 8 }}>
+          <div><p style={{ fontSize: 14, fontWeight: 500 }}>Include HST (13%)</p><p style={{ fontSize: 11, color: 'var(--text-muted)' }}>Add tax to bill</p></div>
+          <button onClick={() => setSf({ ...sf, includeHst: !sf.includeHst })} style={{ width: 48, height: 28, borderRadius: 14, border: 'none', background: sf.includeHst ? 'var(--green)' : 'var(--border)', position: 'relative', cursor: 'pointer', transition: 'background .2s' }}><div style={{ width: 22, height: 22, borderRadius: 11, background: '#fff', position: 'absolute', top: 3, left: sf.includeHst ? 23 : 3, transition: 'left .2s', boxShadow: '0 1px 3px rgba(0,0,0,.2)' }} /></button>
+        </div>
         <button style={{ ...S.btnP, width: '100%', marginTop: 10 }} onClick={handleBillOfSale} disabled={!billItems.length || !sf.buyer || billItems.some(b => !b.sellPrice)}>Generate Bill</button>
       </OL>}
 
@@ -501,4 +610,4 @@ function SC({ si, i, onBill, onShare, onLC, onNote, onMarkPaid, noteCount }) {
   </div>;
 }
 
-const S={app:{display:'flex',flexDirection:'column',height:'100%',background:'var(--bg)'},splash:{display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',height:'100vh',background:'var(--bg)'},logoBig:{width:56,height:56,borderRadius:16,background:'var(--accent)',display:'flex',alignItems:'center',justifyContent:'center',fontSize:28,filter:'brightness(10)',marginBottom:16},spinner:{width:28,height:28,border:'3px solid var(--border)',borderTopColor:'var(--accent)',borderRadius:'50%',animation:'spin .8s linear infinite'},miniSpin:{width:14,height:14,border:'2px solid rgba(255,255,255,.4)',borderTopColor:'#fff',borderRadius:'50%',animation:'spin .6s linear infinite',flexShrink:0,marginRight:8},toast:{position:'fixed',top:12,left:16,right:16,padding:'12px 16px',borderRadius:12,color:'#fff',fontSize:14,fontWeight:500,display:'flex',alignItems:'center',zIndex:200,boxShadow:'0 4px 12px rgba(0,0,0,.15)'},fullOL:{position:'fixed',inset:0,background:'rgba(0,0,0,.5)',display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',zIndex:300},main:{flex:1,overflow:'auto',padding:'0 16px',paddingBottom:'calc(64px + env(safe-area-inset-bottom, 0px))'},ph:{padding:'16px 0 10px'},nav:{display:'flex',justifyContent:'space-around',background:'var(--bg-card)',borderTop:'1px solid var(--border)',position:'fixed',bottom:0,left:0,right:0,zIndex:50,paddingBottom:'env(safe-area-inset-bottom, 0px)'},navI:{display:'flex',flexDirection:'column',alignItems:'center',gap:1,padding:'6px 0',minWidth:50,background:'none',border:'none',fontFamily:'var(--font)',position:'relative'},badge:{position:'absolute',top:0,right:4,background:'var(--accent)',color:'#fff',fontSize:8,fontWeight:700,padding:'1px 4px',borderRadius:10,minWidth:14,textAlign:'center'},sRow:{display:'grid',gridTemplateColumns:'repeat(3, 1fr)',gap:8,marginBottom:14},sC:{background:'var(--bg-card)',borderRadius:12,padding:'10px 12px',boxShadow:'var(--shadow-sm)'},sL:{fontSize:10,color:'var(--text-muted)',textTransform:'uppercase',letterSpacing:.5,marginBottom:2},sV:{fontSize:16,fontWeight:700,fontFamily:'var(--font-mono)'},actC:{display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',gap:6,padding:'20px 12px',background:'var(--bg-card)',borderRadius:12,border:'2px dashed var(--border)',cursor:'pointer',textAlign:'center'},fRow:{display:'flex',gap:6,overflowX:'auto',marginBottom:10,paddingBottom:2},fBtn:{padding:'7px 14px',borderRadius:20,border:'1px solid var(--border)',background:'var(--bg-card)',fontSize:13,color:'var(--text-secondary)',whiteSpace:'nowrap',fontFamily:'var(--font)',cursor:'pointer'},fAct:{background:'var(--accent)',color:'#fff',borderColor:'var(--accent)',fontWeight:600},card:{background:'var(--bg-card)',borderRadius:12,boxShadow:'var(--shadow-sm)',overflow:'hidden'},row:{display:'flex',gap:12,padding:'12px 16px',alignItems:'center',cursor:'pointer'},cT:{fontSize:15,fontWeight:600,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'},cS:{fontSize:12,color:'var(--text-secondary)'},acts:{display:'flex',gap:6,padding:'8px 16px',borderTop:'1px solid var(--border-light)',flexWrap:'wrap'},iBox:{width:40,height:40,borderRadius:10,display:'flex',alignItems:'center',justifyContent:'center',flexShrink:0},thumb:{width:52,height:52,borderRadius:10,overflow:'hidden',flexShrink:0,background:'var(--bg-surface)',display:'flex',alignItems:'center',justifyContent:'center',cursor:'pointer'},tI:{width:'100%',height:'100%',objectFit:'cover'},chip:{padding:'6px 12px',background:'var(--bg-surface)',border:'none',borderRadius:20,fontSize:12,color:'var(--text-secondary)',fontFamily:'var(--font)',cursor:'pointer'},input:{width:'100%',padding:'12px 14px',background:'var(--bg-surface)',border:'1px solid var(--border)',borderRadius:8,fontSize:15,color:'var(--text)',fontFamily:'var(--font)',boxSizing:'border-box',outline:'none'},btnP:{padding:'14px 24px',background:'var(--accent)',color:'#fff',border:'none',borderRadius:10,fontSize:15,fontWeight:600,fontFamily:'var(--font)',textAlign:'center',cursor:'pointer'},btnO:{padding:'12px 16px',background:'var(--bg-surface)',border:'1px solid var(--border)',borderRadius:10,fontSize:14,color:'var(--text)',fontFamily:'var(--font)',textAlign:'center',cursor:'pointer'},linkS:{background:'none',border:'none',color:'var(--accent)',fontSize:13,marginTop:12,width:'100%',textAlign:'center',fontFamily:'var(--font)',cursor:'pointer'},dangerBtn:{width:'100%',padding:14,marginTop:16,background:'var(--red-light)',border:'1px solid var(--red)',borderRadius:10,color:'var(--red)',fontSize:14,fontFamily:'var(--font)',cursor:'pointer'},togBtn:{flex:1,padding:'10px',borderRadius:8,border:'1px solid var(--border)',background:'var(--bg-surface)',fontSize:14,fontFamily:'var(--font)',textAlign:'center',cursor:'pointer',color:'var(--text-secondary)'},togAct:{background:'var(--accent-light)',color:'var(--accent)',borderColor:'var(--accent)',fontWeight:600},mi:{display:'flex',alignItems:'center',gap:12,width:'100%',padding:'14px 16px',background:'var(--bg-surface)',border:'none',borderRadius:8,fontSize:15,fontFamily:'var(--font)',marginBottom:6,textAlign:'left',cursor:'pointer'},segBtn:{flex:1,padding:'10px 0',border:'none',background:'var(--bg-surface)',fontSize:13,fontFamily:'var(--font)',cursor:'pointer',color:'var(--text-secondary)',textAlign:'center'},segAct:{background:'var(--accent)',color:'#fff',fontWeight:600},overlay:{position:'fixed',inset:0,background:'rgba(0,0,0,.4)',display:'flex',alignItems:'flex-end',justifyContent:'center',zIndex:100},modal:{background:'var(--bg-card)',borderRadius:'20px 20px 0 0',padding:'8px 20px 28px',width:'100%',maxWidth:500,maxHeight:'88vh',overflow:'auto'},handle:{width:36,height:4,background:'var(--border)',borderRadius:4,margin:'0 auto 14px'},mT:{fontSize:18,fontWeight:700,marginBottom:6}};
+const S={app:{display:'flex',flexDirection:'column',height:'100%',background:'var(--bg)'},splash:{display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',height:'100vh',background:'var(--bg)'},logoBig:{width:56,height:56,borderRadius:16,background:'var(--accent)',display:'flex',alignItems:'center',justifyContent:'center',fontSize:28,filter:'brightness(10)',marginBottom:16},spinner:{width:28,height:28,border:'3px solid var(--border)',borderTopColor:'var(--accent)',borderRadius:'50%',animation:'spin .8s linear infinite'},miniSpin:{width:14,height:14,border:'2px solid rgba(255,255,255,.4)',borderTopColor:'#fff',borderRadius:'50%',animation:'spin .6s linear infinite',flexShrink:0,marginRight:8},toast:{position:'fixed',top:12,left:16,right:16,padding:'12px 16px',borderRadius:12,color:'#fff',fontSize:14,fontWeight:500,display:'flex',alignItems:'center',zIndex:200,boxShadow:'0 4px 12px rgba(0,0,0,.15)'},fullOL:{position:'fixed',inset:0,background:'rgba(0,0,0,.5)',display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',zIndex:300},main:{flex:1,overflow:'auto',padding:'0 16px',paddingBottom:'calc(64px + env(safe-area-inset-bottom, 0px))'},ph:{padding:'16px 0 10px'},nav:{display:'flex',justifyContent:'space-around',background:'var(--bg-card)',borderTop:'1px solid var(--border)',position:'fixed',bottom:0,left:0,right:0,zIndex:50,paddingBottom:'env(safe-area-inset-bottom, 0px)'},navI:{display:'flex',flexDirection:'column',alignItems:'center',gap:1,padding:'6px 0',minWidth:50,background:'none',border:'none',fontFamily:'var(--font)',position:'relative'},badge:{position:'absolute',top:0,right:4,background:'var(--accent)',color:'#fff',fontSize:8,fontWeight:700,padding:'1px 4px',borderRadius:10,minWidth:14,textAlign:'center'},sRow:{display:'grid',gridTemplateColumns:'repeat(3, 1fr)',gap:8,marginBottom:14},sC:{background:'var(--bg-card)',borderRadius:12,padding:'10px 12px',boxShadow:'var(--shadow-sm)'},sL:{fontSize:10,color:'var(--text-muted)',textTransform:'uppercase',letterSpacing:.5,marginBottom:2},sV:{fontSize:16,fontWeight:700,fontFamily:'var(--font-mono)'},actC:{display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',gap:6,padding:'20px 12px',background:'var(--bg-card)',borderRadius:12,border:'2px dashed var(--border)',cursor:'pointer',textAlign:'center'},fRow:{display:'flex',gap:6,overflowX:'auto',marginBottom:10,paddingBottom:2},fBtn:{padding:'7px 14px',borderRadius:20,border:'1px solid var(--border)',background:'var(--bg-card)',fontSize:13,color:'var(--text-secondary)',whiteSpace:'nowrap',fontFamily:'var(--font)',cursor:'pointer'},fAct:{background:'var(--accent)',color:'#fff',borderColor:'var(--accent)',fontWeight:600},card:{background:'var(--bg-card)',borderRadius:12,boxShadow:'var(--shadow-sm)',overflow:'hidden'},row:{display:'flex',gap:12,padding:'12px 16px',alignItems:'center',cursor:'pointer'},cT:{fontSize:15,fontWeight:600,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'},cS:{fontSize:12,color:'var(--text-secondary)'},acts:{display:'flex',gap:6,padding:'8px 16px',borderTop:'1px solid var(--border-light)',flexWrap:'wrap'},iBox:{width:40,height:40,borderRadius:10,display:'flex',alignItems:'center',justifyContent:'center',flexShrink:0},thumb:{width:52,height:52,borderRadius:10,overflow:'hidden',flexShrink:0,background:'var(--bg-surface)',display:'flex',alignItems:'center',justifyContent:'center',cursor:'pointer'},tI:{width:'100%',height:'100%',objectFit:'cover'},chip:{padding:'6px 12px',background:'var(--bg-surface)',border:'none',borderRadius:20,fontSize:12,color:'var(--text-secondary)',fontFamily:'var(--font)',cursor:'pointer'},input:{width:'100%',padding:'12px 14px',background:'var(--bg-surface)',border:'1px solid var(--border)',borderRadius:8,fontSize:15,color:'var(--text)',fontFamily:'var(--font)',boxSizing:'border-box',outline:'none'},btnP:{padding:'14px 24px',background:'var(--accent)',color:'#fff',border:'none',borderRadius:10,fontSize:15,fontWeight:600,fontFamily:'var(--font)',textAlign:'center',cursor:'pointer'},btnO:{padding:'12px 16px',background:'var(--bg-surface)',border:'1px solid var(--border)',borderRadius:10,fontSize:14,color:'var(--text)',fontFamily:'var(--font)',textAlign:'center',cursor:'pointer'},linkS:{background:'none',border:'none',color:'var(--accent)',fontSize:13,marginTop:12,width:'100%',textAlign:'center',fontFamily:'var(--font)',cursor:'pointer'},dangerBtn:{width:'100%',padding:14,marginTop:16,background:'var(--red-light)',border:'1px solid var(--red)',borderRadius:10,color:'var(--red)',fontSize:14,fontFamily:'var(--font)',cursor:'pointer'},togBtn:{flex:1,padding:'10px',borderRadius:8,border:'1px solid var(--border)',background:'var(--bg-surface)',fontSize:14,fontFamily:'var(--font)',textAlign:'center',cursor:'pointer',color:'var(--text-secondary)'},togAct:{background:'var(--accent-light)',color:'var(--accent)',borderColor:'var(--accent)',fontWeight:600},mi:{display:'flex',alignItems:'center',gap:12,width:'100%',padding:'14px 16px',background:'var(--bg-surface)',border:'none',borderRadius:8,fontSize:15,fontFamily:'var(--font)',marginBottom:6,textAlign:'left',cursor:'pointer'},segBtn:{flex:1,padding:'10px 0',border:'none',background:'var(--bg-surface)',fontSize:13,fontFamily:'var(--font)',cursor:'pointer',color:'var(--text-secondary)',textAlign:'center'},segAct:{background:'var(--accent)',color:'#fff',fontWeight:600},sumBar:{display:'flex',flexWrap:'wrap',gap:0,background:'var(--bg-card)',borderRadius:10,boxShadow:'var(--shadow-sm)',marginBottom:10,overflow:'hidden'},sumItem:{flex:'1 1 auto',padding:'8px 12px',textAlign:'center',borderRight:'1px solid var(--border-light)',minWidth:70},sumL:{display:'block',fontSize:9,color:'var(--text-muted)',textTransform:'uppercase',letterSpacing:.5},sumV:{display:'block',fontSize:13,fontWeight:700,fontFamily:'var(--font-mono)',color:'var(--text)'},overlay:{position:'fixed',inset:0,background:'rgba(0,0,0,.4)',display:'flex',alignItems:'flex-end',justifyContent:'center',zIndex:100},modal:{background:'var(--bg-card)',borderRadius:'20px 20px 0 0',padding:'8px 20px 28px',width:'100%',maxWidth:500,maxHeight:'88vh',overflow:'auto'},handle:{width:36,height:4,background:'var(--border)',borderRadius:4,margin:'0 auto 14px'},mT:{fontSize:18,fontWeight:700,marginBottom:6}};
