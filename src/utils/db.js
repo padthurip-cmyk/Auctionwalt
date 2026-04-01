@@ -35,51 +35,14 @@ export async function getLifecycle(itemId, soldItemId) { let q = supabase.from('
 export async function addLifecycleEvent(event) { const user = await getUser(); const { error } = await supabase.from('lifecycle_events').insert({ ...event, user_id: user.id }); if (error) throw error; }
 export async function addLifecycleEvents(events) { const user = await getUser(); const rows = events.map(e => ({ ...e, user_id: user.id })); const { error } = await supabase.from('lifecycle_events').insert(rows); if (error) throw error; }
 
-// ─── Item Notes / Comments ───
-export async function getNotes(itemId, soldItemId) {
-  let q = supabase.from('item_notes').select('*').order('created_at', { ascending: false });
-  if (itemId) q = q.eq('item_id', itemId);
-  if (soldItemId) q = q.eq('sold_item_id', soldItemId);
-  const { data, error } = await q;
-  if (error) throw error;
-  return data || [];
-}
-
-export async function getAllNotes() {
-  const { data, error } = await supabase.from('item_notes').select('*').order('created_at', { ascending: false });
-  if (error) throw error;
-  return data || [];
-}
-
-export async function getOpenNotes() {
-  const { data, error } = await supabase.from('item_notes').select('*').eq('is_resolved', false).order('created_at', { ascending: false });
-  if (error) throw error;
-  return data || [];
-}
-
-export async function insertNote(note) {
-  const user = await getUser();
-  const { data, error } = await supabase.from('item_notes').insert({ ...note, user_id: user.id }).select().single();
-  if (error) throw error;
-  return data;
-}
-
-export async function updateNote(id, updates) {
-  const { data, error } = await supabase.from('item_notes').update(updates).eq('id', id).select().single();
-  if (error) throw error;
-  return data;
-}
-
-export async function resolveNote(id) {
-  const { data, error } = await supabase.from('item_notes').update({ is_resolved: true, resolved_at: new Date().toISOString() }).eq('id', id).select().single();
-  if (error) throw error;
-  return data;
-}
-
-export async function deleteNote(id) {
-  const { error } = await supabase.from('item_notes').delete().eq('id', id);
-  if (error) throw error;
-}
+// ─── Notes ───
+export async function getNotes(itemId, soldItemId) { let q = supabase.from('item_notes').select('*').order('created_at', { ascending: false }); if (itemId) q = q.eq('item_id', itemId); if (soldItemId) q = q.eq('sold_item_id', soldItemId); const { data, error } = await q; if (error) throw error; return data || []; }
+export async function getAllNotes() { const { data, error } = await supabase.from('item_notes').select('*').order('created_at', { ascending: false }); if (error) throw error; return data || []; }
+export async function getOpenNotes() { const { data, error } = await supabase.from('item_notes').select('*').eq('is_resolved', false).order('created_at', { ascending: false }); if (error) throw error; return data || []; }
+export async function insertNote(note) { const user = await getUser(); const { data, error } = await supabase.from('item_notes').insert({ ...note, user_id: user.id }).select().single(); if (error) throw error; return data; }
+export async function updateNote(id, updates) { const { data, error } = await supabase.from('item_notes').update(updates).eq('id', id).select().single(); if (error) throw error; return data; }
+export async function resolveNote(id) { const { data, error } = await supabase.from('item_notes').update({ is_resolved: true, resolved_at: new Date().toISOString() }).eq('id', id).select().single(); if (error) throw error; return data; }
+export async function deleteNote(id) { const { error } = await supabase.from('item_notes').delete().eq('id', id); if (error) throw error; }
 
 // ─── Settings ───
 export async function getSettings() { const { data, error } = await supabase.from('settings').select('*').maybeSingle(); if (error) throw error; return data; }
@@ -97,13 +60,15 @@ export async function uploadInvoiceFile(invoiceId, base64Data, fileName, fileTyp
 }
 export async function getInvoiceFileUrl(filePath) { if (!filePath) return null; const { data, error } = await supabase.storage.from('invoice-files').createSignedUrl(filePath, 3600); if (error) throw error; return data?.signedUrl; }
 
+// Upload photo — returns { path, record } so caller can build instant preview
 export async function uploadPhoto(itemId, file) {
   const user = await getUser(); const ext = file.name.split('.').pop() || 'jpg';
   const path = `${user.id}/${itemId}/${Date.now().toString(36)}.${ext}`;
   const { error } = await supabase.storage.from('product-photos').upload(path, file, { contentType: file.type, upsert: true });
   if (error) throw error;
-  await supabase.from('item_photos').insert({ user_id: user.id, item_id: itemId, file_path: path, file_name: file.name });
-  return path;
+  const { data: record, error: recErr } = await supabase.from('item_photos').insert({ user_id: user.id, item_id: itemId, file_path: path, file_name: file.name }).select().single();
+  if (recErr) throw recErr;
+  return { path, record };
 }
 
 export async function deletePhoto(photoId, filePath) {
