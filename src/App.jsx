@@ -85,8 +85,16 @@ export default function App() {
   // Load all
   const load = useCallback(async () => {
     try {
-      const [inv, itm, sld, cust, s, notes] = await Promise.all([db.getInvoices(), db.getItems(), db.getSoldItems(), db.getCustomers(), db.getSettings(), db.getAllNotes()]);
+      const [inv, itm, sld, cust, s, notes, thumbs] = await Promise.all([db.getInvoices(), db.getItems(), db.getSoldItems(), db.getCustomers(), db.getSettings(), db.getAllNotes(), db.getAllThumbnails()]);
       setInvoices(inv); setItems(itm); setSold(sld); setCustomers(cust); setAllNotes(notes); if (s) setBiz(s);
+      // Merge thumbnails without overwriting full photo lists already loaded
+      setItemPhotos(prev => {
+        const merged = { ...prev };
+        for (const [id, photos] of Object.entries(thumbs)) {
+          if (!merged[id] || merged[id].length <= 1) merged[id] = photos;
+        }
+        return merged;
+      });
     } catch (e) { console.error(e); }
   }, []);
   useEffect(() => { if (auth === 'app') load(); }, [auth, load]);
@@ -123,24 +131,17 @@ export default function App() {
   const setListingStatus = useCallback(async (item, st, platform, price) => { const u = { listing_status: st }; if (platform) u.listing_platform = platform; if (price) u.listing_price = price; if (st === 'live_listed') u.listed_at = new Date().toISOString(); await db.updateItem(item.id, u); await db.addLifecycleEvent({ item_id: item.id, event: st === 'live_listed' ? 'Listed Live' : st === 'pending_list' ? 'Pending List' : 'Unlisted', detail: platform || '' }); await load(); notify('ok', st === 'live_listed' ? 'Listed' : st === 'pending_list' ? 'Pending' : 'Unlisted'); }, [load, notify]);
   const handlePhoto = useCallback(async (id, e) => {
     const files = Array.from(e.target.files || []); if (!files.length) return;
-    // Instant local preview — show blob URLs immediately
-    const previews = files.map(f => ({ id: 'temp_' + Date.now() + Math.random(), url: URL.createObjectURL(f), file_name: f.name, file_path: null, _uploading: true }));
+    // Show instant blob previews
+    const previews = files.map(f => ({ id: 'temp_' + Date.now() + Math.random(), url: URL.createObjectURL(f), file_name: f.name }));
     setItemPhotos(prev => ({ ...prev, [id]: [...(prev[id] || []), ...previews] }));
-    // Upload in background, replace previews with real URLs
-    for (let idx = 0; idx < files.length; idx++) {
-      try {
-        const { record } = await db.uploadPhoto(id, files[idx]);
-        const { data: u } = await (await import('./utils/supabase')).supabase.storage.from('product-photos').createSignedUrl(record.file_path, 3600);
-        setItemPhotos(prev => {
-          const arr = [...(prev[id] || [])];
-          const pi = arr.findIndex(p => p.id === previews[idx].id);
-          if (pi >= 0) arr[pi] = { ...record, url: u?.signedUrl };
-          return { ...prev, [id]: arr };
-        });
-      } catch (err) { console.error('Upload error:', err); }
+    // Upload all files to Supabase
+    for (const f of files) {
+      try { await db.uploadPhoto(id, f); } catch (err) { console.error('Upload error:', err); }
     }
+    // Reload real signed URLs (replaces blob previews)
+    await loadPhotos(id);
     notify('ok', `${files.length} photo(s) saved`);
-  }, [notify]);
+  }, [notify, loadPhotos]);
   const handleDeletePhoto = useCallback(async (itemId, photo) => { if (!confirm('Delete photo?')) return; await db.deletePhoto(photo.id, photo.file_path); await loadPhotos(itemId); notify('ok', 'Deleted'); }, [loadPhotos, notify]);
 
   // ─── Notes ───
@@ -221,6 +222,42 @@ export default function App() {
   }, [biz, notify]);
 
   const markBillPaid = useCallback(async (si) => { await db.updateSoldItem(si.id, { bill_status: 'paid', paid_at: new Date().toISOString() }); await db.addLifecycleEvent({ sold_item_id: si.id, event: 'Paid', detail: fmt(si.sold_price) }); await load(); notify('ok', 'Paid'); }, [load, notify]);
+
+  // Edit sold item
+  const openEditSold = useCallback((si) => {
+    setSf({ amount: String(si.sold_price || ''), platform: si.sold_platform || '', buyer: si.sold_buyer || '', buyerEmail: si.sold_buyer_email || '', buyerPhone: si.sold_buyer_phone || '', billStatus: si.bill_status || 'paid', includeHst: true, listingUrl: '' });
+    setModal({ type: 'editSold', data: si });
+  }, []);
+
+  const handleEditSold = useCallback(async () => {
+    const si = modal?.data; if (!si) return;
+    const amt = parseFloat(sf.amount); if (isNaN(amt)) return;
+    const cost = parseFloat(si.total_cost); const profit = +(amt - cost).toFixed(2); const pct = cost > 0 ? +((profit / cost) * 100).toFixed(1) : 0;
+    await db.updateSoldItem(si.id, { sold_price: amt, sold_platform: sf.platform, sold_buyer: sf.buyer, sold_buyer_email: sf.buyerEmail, sold_buyer_phone: sf.buyerPhone, bill_status: sf.billStatus, profit, profit_pct: pct, paid_at: sf.billStatus === 'paid' ? (si.paid_at || new Date().toISOString()) : null });
+    await db.addLifecycleEvent({ sold_item_id: si.id, event: 'Sale Edited', detail: `Price: ${fmt(amt)} · ${sf.billStatus.toUpperCase()}` });
+    await load(); closeModal(); notify('ok', 'Sale updated');
+  }, [modal, sf, load, notify]);
+
+  // Return sold item back to inventory
+  const returnToInventory = useCallback(async (si) => {
+    if (!confirm(`Move "${si.title}" back to inventory? This will remove the sale record.`)) return;
+    // Re-insert as inventory item
+    const newItem = await db.insertItems([{
+      invoice_id: si.invoice_id, lot_number: si.lot_number, title: si.title, description: si.description,
+      quantity: si.quantity, hammer_price: si.hammer_price, premium_rate: si.premium_rate, tax_rate: si.tax_rate,
+      premium_amount: si.premium_amount, subtotal: si.subtotal, tax_amount: si.tax_amount, total_cost: si.total_cost,
+      auction_house: si.auction_house, date: si.date, pickup_location: si.pickup_location,
+      payment_method: si.payment_method, status: 'in_inventory', purpose: 'for_sale', listing_status: 'none',
+    }]);
+    // Copy lifecycle from sold to new item
+    const oldLc = await db.getLifecycle(null, si.id);
+    if (oldLc.length && newItem[0]) await db.addLifecycleEvents(oldLc.map(ev => ({ item_id: newItem[0].id, event: ev.event, detail: ev.detail, created_at: ev.created_at })));
+    if (newItem[0]) await db.addLifecycleEvent({ item_id: newItem[0].id, event: 'Returned to Inventory', detail: `Was sold for ${fmt(si.sold_price)} to ${si.sold_buyer || 'buyer'} · ${si.receipt_number}` });
+    // Delete sold record — use supabase directly since we don't have a deleteSoldItem helper
+    const { supabase } = await import('./utils/supabase');
+    await supabase.from('sold_items').delete().eq('id', si.id);
+    await load(); notify('ok', `"${si.title}" returned to inventory`);
+  }, [load, notify]);
   const handleLC = useCallback(async (item, isSold) => { setModal({ type: 'lc', data: item }); setLcEvents(await db.getLifecycle(isSold ? null : item.id, isSold ? item.id : null)); }, []);
   const handleEmail = useCallback(() => { if (!emailTo || !modal?.data) return; const b = { name: biz.business_name, address: biz.address, phone: biz.phone }; sendEmailFallback(emailTo, `Bill #${modal.data.receipt_number}`, buildReceiptText(modal.data, b)); notify('ok', 'Opening email'); closeModal(); }, [emailTo, modal, biz, notify]);
 
@@ -332,9 +369,9 @@ export default function App() {
         {tab === 'sales' && <div>
           <div style={S.ph}><h1 style={{ fontSize: 22, fontWeight: 700 }}>Sales</h1><p style={{ fontSize: 13, color: 'var(--text-secondary)' }}>{fmt(totalRev)} revenue · <span style={{ color: totalProfit >= 0 ? 'var(--green)' : 'var(--red)' }}>{totalProfit >= 0 ? '+' : ''}{fmt(totalProfit)}</span></p></div>
           <div style={S.fRow}>{SALE_FILTERS.map(f => <button key={f} style={{ ...S.fBtn, ...(saleFilter === f ? S.fAct : {}) }} onClick={() => setSaleFilter(f)}>{f}{f === 'Due' && dueBills.length ? ` (${dueBills.length})` : ''}</button>)}</div>
-          {saleFilter === 'New Bill' && <div><button style={{ ...S.btnP, width: '100%', marginBottom: 12 }} onClick={() => setModal({ type: 'billOfSale' })}>🧾 Create Bill of Sale</button>{sold.length > 0 && <div style={S.sumBar}><div style={S.sumItem}><span style={S.sumL}>{sold.length} sales</span></div><div style={S.sumItem}><span style={S.sumL}>Cost</span><span style={S.sumV}>{fmt(sold.reduce((s,i)=>s+parseFloat(i.total_cost||0),0))}</span></div><div style={S.sumItem}><span style={S.sumL}>Revenue</span><span style={S.sumV}>{fmt(totalRev)}</span></div><div style={S.sumItem}><span style={S.sumL}>Profit</span><span style={{...S.sumV,color:totalProfit>=0?'var(--green)':'var(--red)'}}>{totalProfit>=0?'+':''}{fmt(totalProfit)}</span></div></div>}{sold.map((si, i) => <SC key={si.id} si={si} i={i} onBill={() => viewBill(si)} onShare={() => setModal({ type: 'share', data: si })} onLC={() => handleLC(si, true)} onNote={() => { setModal({ type: 'notes', data: si, isSold: true }); loadItemNotes(null, si.id); }} onMarkPaid={si.bill_status === 'due' ? () => markBillPaid(si) : null} noteCount={allNotes.filter(n => n.sold_item_id === si.id && !n.is_resolved).length} />)}</div>}
-          {saleFilter === 'Due' && <div>{dueBills.length === 0 ? <Empty text="No unpaid" /> : <>{(() => { const dueTotal = dueBills.reduce((s,i)=>s+parseFloat(i.sold_price||0),0); const dueCost = dueBills.reduce((s,i)=>s+parseFloat(i.total_cost||0),0); return <div style={{...S.sumBar, borderLeft:'3px solid var(--red)'}}><div style={S.sumItem}><span style={S.sumL}>{dueBills.length} unpaid</span></div><div style={S.sumItem}><span style={S.sumL}>Outstanding</span><span style={{...S.sumV,color:'var(--red)'}}>{fmt(dueTotal)}</span></div><div style={S.sumItem}><span style={S.sumL}>Your Cost</span><span style={S.sumV}>{fmt(dueCost)}</span></div></div>; })()}{dueBills.map((si, i) => <SC key={si.id} si={si} i={i} onBill={() => viewBill(si)} onShare={() => setModal({ type: 'share', data: si })} onLC={() => handleLC(si, true)} onNote={() => { setModal({ type: 'notes', data: si, isSold: true }); loadItemNotes(null, si.id); }} onMarkPaid={() => markBillPaid(si)} noteCount={allNotes.filter(n => n.sold_item_id === si.id && !n.is_resolved).length} />)}</>}</div>}
-          {saleFilter === 'Closed' && <div>{closedBills.length === 0 ? <Empty text="No closed" /> : <>{(() => { const cRev = closedBills.reduce((s,i)=>s+parseFloat(i.sold_price||0),0); const cCost = closedBills.reduce((s,i)=>s+parseFloat(i.total_cost||0),0); const cProfit = closedBills.reduce((s,i)=>s+parseFloat(i.profit||0),0); return <div style={{...S.sumBar, borderLeft:'3px solid var(--green)'}}><div style={S.sumItem}><span style={S.sumL}>{closedBills.length} closed</span></div><div style={S.sumItem}><span style={S.sumL}>Cost</span><span style={S.sumV}>{fmt(cCost)}</span></div><div style={S.sumItem}><span style={S.sumL}>Revenue</span><span style={S.sumV}>{fmt(cRev)}</span></div><div style={S.sumItem}><span style={S.sumL}>Profit</span><span style={{...S.sumV,color:'var(--green)'}}>+{fmt(cProfit)}</span></div></div>; })()}{closedBills.map((si, i) => <SC key={si.id} si={si} i={i} onBill={() => viewBill(si)} onShare={() => setModal({ type: 'share', data: si })} onLC={() => handleLC(si, true)} onNote={() => { setModal({ type: 'notes', data: si, isSold: true }); loadItemNotes(null, si.id); }} noteCount={allNotes.filter(n => n.sold_item_id === si.id && !n.is_resolved).length} />)}</>}</div>}
+          {saleFilter === 'New Bill' && <div><button style={{ ...S.btnP, width: '100%', marginBottom: 12 }} onClick={() => setModal({ type: 'billOfSale' })}>🧾 Create Bill of Sale</button>{sold.length > 0 && <div style={S.sumBar}><div style={S.sumItem}><span style={S.sumL}>{sold.length} sales</span></div><div style={S.sumItem}><span style={S.sumL}>Cost</span><span style={S.sumV}>{fmt(sold.reduce((s,i)=>s+parseFloat(i.total_cost||0),0))}</span></div><div style={S.sumItem}><span style={S.sumL}>Revenue</span><span style={S.sumV}>{fmt(totalRev)}</span></div><div style={S.sumItem}><span style={S.sumL}>Profit</span><span style={{...S.sumV,color:totalProfit>=0?'var(--green)':'var(--red)'}}>{totalProfit>=0?'+':''}{fmt(totalProfit)}</span></div></div>}{sold.map((si, i) => <SC key={si.id} si={si} i={i} onBill={() => viewBill(si)} onShare={() => setModal({ type: 'share', data: si })} onLC={() => handleLC(si, true)} onNote={() => { setModal({ type: 'notes', data: si, isSold: true }); loadItemNotes(null, si.id); }} onMarkPaid={si.bill_status === 'due' ? () => markBillPaid(si) : null} onEdit={() => openEditSold(si)} onReturn={() => returnToInventory(si)} noteCount={allNotes.filter(n => n.sold_item_id === si.id && !n.is_resolved).length} />)}</div>}
+          {saleFilter === 'Due' && <div>{dueBills.length === 0 ? <Empty text="No unpaid" /> : <>{(() => { const dueTotal = dueBills.reduce((s,i)=>s+parseFloat(i.sold_price||0),0); const dueCost = dueBills.reduce((s,i)=>s+parseFloat(i.total_cost||0),0); return <div style={{...S.sumBar, borderLeft:'3px solid var(--red)'}}><div style={S.sumItem}><span style={S.sumL}>{dueBills.length} unpaid</span></div><div style={S.sumItem}><span style={S.sumL}>Outstanding</span><span style={{...S.sumV,color:'var(--red)'}}>{fmt(dueTotal)}</span></div><div style={S.sumItem}><span style={S.sumL}>Your Cost</span><span style={S.sumV}>{fmt(dueCost)}</span></div></div>; })()}{dueBills.map((si, i) => <SC key={si.id} si={si} i={i} onBill={() => viewBill(si)} onShare={() => setModal({ type: 'share', data: si })} onLC={() => handleLC(si, true)} onNote={() => { setModal({ type: 'notes', data: si, isSold: true }); loadItemNotes(null, si.id); }} onMarkPaid={() => markBillPaid(si)} onEdit={() => openEditSold(si)} onReturn={() => returnToInventory(si)} noteCount={allNotes.filter(n => n.sold_item_id === si.id && !n.is_resolved).length} />)}</>}</div>}
+          {saleFilter === 'Closed' && <div>{closedBills.length === 0 ? <Empty text="No closed" /> : <>{(() => { const cRev = closedBills.reduce((s,i)=>s+parseFloat(i.sold_price||0),0); const cCost = closedBills.reduce((s,i)=>s+parseFloat(i.total_cost||0),0); const cProfit = closedBills.reduce((s,i)=>s+parseFloat(i.profit||0),0); return <div style={{...S.sumBar, borderLeft:'3px solid var(--green)'}}><div style={S.sumItem}><span style={S.sumL}>{closedBills.length} closed</span></div><div style={S.sumItem}><span style={S.sumL}>Cost</span><span style={S.sumV}>{fmt(cCost)}</span></div><div style={S.sumItem}><span style={S.sumL}>Revenue</span><span style={S.sumV}>{fmt(cRev)}</span></div><div style={S.sumItem}><span style={S.sumL}>Profit</span><span style={{...S.sumV,color:'var(--green)'}}>+{fmt(cProfit)}</span></div></div>; })()}{closedBills.map((si, i) => <SC key={si.id} si={si} i={i} onBill={() => viewBill(si)} onShare={() => setModal({ type: 'share', data: si })} onLC={() => handleLC(si, true)} onNote={() => { setModal({ type: 'notes', data: si, isSold: true }); loadItemNotes(null, si.id); }} onEdit={() => openEditSold(si)} onReturn={() => returnToInventory(si)} noteCount={allNotes.filter(n => n.sold_item_id === si.id && !n.is_resolved).length} />)}</>}</div>}
         </div>}
 
         {/* ═══ ISSUES DASHBOARD ═══ */}
@@ -576,6 +613,25 @@ export default function App() {
       {/* BILL PREVIEW */}
       {modal?.type === 'billPreview' && <OL close={closeModal}><h3 style={S.mT}>Bill — {modal.data.receipt_number}</h3><Pill text={modal.data.bill_status === 'due' ? 'Due' : 'Paid'} ok={modal.data.bill_status !== 'due'} /><div style={{ background: '#fff', borderRadius: 8, maxHeight: '40vh', overflow: 'auto', margin: '12px 0', border: '1px solid var(--border)' }} dangerouslySetInnerHTML={{ __html: billHtml || modal.data.receipt_html }} /><div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}><button style={S.btnP} onClick={() => printHTML(billHtml || modal.data.receipt_html)}>🖨 Print</button><button style={S.btnO} onClick={() => { setEmailTo(modal.data.sold_buyer_email || ''); setModal({ type: 'email', data: modal.data }); }}>📧 Email</button><button style={S.btnO} onClick={() => openWhatsApp(modal.data.sold_buyer_phone, `Bill #${modal.data.receipt_number}\n${buildReceiptText(modal.data, { name: biz.business_name, phone: biz.phone })}`)}>📱 WhatsApp</button><button style={S.btnO} onClick={() => { navigator.clipboard?.writeText(`Bill #${modal.data.receipt_number}\n${buildReceiptText(modal.data, { name: biz.business_name, address: biz.address, phone: biz.phone })}`); notify('ok', 'Copied'); }}>📋 Copy</button></div>{modal.data.bill_status === 'due' && <button style={{ ...S.btnP, width: '100%', marginTop: 10, background: 'var(--green)' }} onClick={() => { markBillPaid(modal.data); closeModal(); }}>✅ Mark Paid</button>}</OL>}
 
+      {/* EDIT SOLD */}
+      {modal?.type === 'editSold' && <OL close={closeModal}>
+        <h3 style={S.mT}>Edit Sale — {modal.data.title}</h3>
+        <p style={{ fontSize: 13, color: 'var(--text-secondary)', marginBottom: 4 }}>Your cost: {fmt(modal.data.total_cost)} · {modal.data.receipt_number}</p>
+        <Lbl t="Sale Amount" /><input style={S.input} type="number" step="0.01" value={sf.amount} onChange={e => setSf({ ...sf, amount: e.target.value })} autoFocus />
+        <Lbl t="Platform" /><input style={S.input} value={sf.platform} onChange={e => setSf({ ...sf, platform: e.target.value })} placeholder="Facebook, Kijiji..." />
+        <Lbl t="Buyer Name" /><input style={S.input} value={sf.buyer} onChange={e => setSf({ ...sf, buyer: e.target.value })} />
+        <Lbl t="Buyer Email" /><input style={S.input} type="email" value={sf.buyerEmail} onChange={e => setSf({ ...sf, buyerEmail: e.target.value })} />
+        <Lbl t="Buyer Phone" /><input style={S.input} type="tel" value={sf.buyerPhone} onChange={e => setSf({ ...sf, buyerPhone: e.target.value })} />
+        <Lbl t="Payment Status" />
+        <div style={{ display: 'flex', gap: 8, marginBottom: 8 }}>
+          <button style={{ ...S.togBtn, ...(sf.billStatus === 'paid' ? S.togAct : {}) }} onClick={() => setSf({ ...sf, billStatus: 'paid' })}>✅ Paid</button>
+          <button style={{ ...S.togBtn, ...(sf.billStatus === 'due' ? { ...S.togAct, background: 'var(--red-light)', color: 'var(--red)', borderColor: 'var(--red)' } : {}) }} onClick={() => setSf({ ...sf, billStatus: 'due' })}>⏳ Due</button>
+        </div>
+        {sf.amount && (() => { const p = parseFloat(sf.amount) - parseFloat(modal.data.total_cost); return <div style={{ display: 'flex', justifyContent: 'space-between', padding: '10px 14px', background: p >= 0 ? 'var(--green-light)' : 'var(--red-light)', borderRadius: 8 }}><span>Profit</span><span style={{ fontWeight: 700, color: p >= 0 ? 'var(--green)' : 'var(--red)' }}>{p >= 0 ? '+' : ''}{fmt(p)}</span></div>; })()}
+        <button style={{ ...S.btnP, width: '100%', marginTop: 14 }} onClick={handleEditSold} disabled={!sf.amount}>Save Changes</button>
+        <button style={{ width: '100%', marginTop: 8, padding: '12px', background: 'var(--bg-surface)', border: '1px solid var(--border)', borderRadius: 10, fontSize: 14, fontFamily: 'var(--font)', cursor: 'pointer', color: 'var(--blue)', textAlign: 'center' }} onClick={() => { closeModal(); returnToInventory(modal.data); }}>↩ Return to Inventory</button>
+      </OL>}
+
       {/* PHOTOS */}
       {modal?.type === 'photos' && <OL close={closeModal}><h3 style={S.mT}>Photos</h3><label role="button" style={{ ...S.btnP, display: 'block', textAlign: 'center', marginBottom: 12 }}><input type="file" accept="image/*" multiple onChange={e => handlePhoto(modal.data.id, e)} style={{ display: 'none' }} />Upload</label>{(itemPhotos[modal.data.id] || []).length > 0 ? <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 8 }}>{(itemPhotos[modal.data.id]).map((p, i) => <div key={p.id || i} style={{ position: 'relative', aspectRatio: '1', borderRadius: 10, overflow: 'hidden', background: 'var(--bg-surface)' }}>{p.url ? <img src={p.url} alt="" style={{ width: '100%', height: '100%', objectFit: 'cover' }} /> : <div style={{ width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>...</div>}<button onClick={() => handleDeletePhoto(modal.data.id, p)} style={{ position: 'absolute', top: 4, right: 4, width: 24, height: 24, borderRadius: 12, background: 'rgba(0,0,0,.6)', color: '#fff', border: 'none', fontSize: 14, display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer' }}>✕</button></div>)}</div> : <p style={{ textAlign: 'center', color: 'var(--text-muted)', padding: 20 }}>No photos</p>}</OL>}
 
@@ -602,11 +658,11 @@ function Lbl({ t }) { return <label style={{ display: 'block', fontSize: 12, fon
 function NB({ l, v, c }) { return <div style={{ background: 'var(--bg-surface)', borderRadius: 8, padding: '6px 12px', flex: '1 1 70px' }}><p style={{ fontSize: 9, color: 'var(--text-muted)', textTransform: 'uppercase' }}>{l}</p><p style={{ fontSize: 14, fontWeight: 700, fontFamily: 'var(--font-mono)', color: c || 'var(--text)' }}>{v}</p></div>; }
 function MBtn({ icon, label, onClick, color }) { return <button style={{ ...S.mi, color: color || 'var(--text)' }} onClick={onClick}><span style={{ fontSize: 18 }}>{icon}</span>{label}</button>; }
 function Stat({ label, value, sub, color }) { return <div style={{ ...S.sC, borderLeft: `3px solid ${color}` }}><p style={S.sL}>{label}</p><p style={{ ...S.sV, color }}>{value}</p><p style={{ fontSize: 11, color: 'var(--text-secondary)' }}>{sub}</p></div>; }
-function SC({ si, i, onBill, onShare, onLC, onNote, onMarkPaid, noteCount }) {
+function SC({ si, i, onBill, onShare, onLC, onNote, onMarkPaid, onEdit, onReturn, noteCount }) {
   const p = parseFloat(si.profit);
   return <div className="fade-up" style={{ ...S.card, marginBottom: 8, animationDelay: `${i * 25}ms`, ...(noteCount > 0 ? { borderLeft: '3px solid #F59E0B' } : {}) }}>
     <div style={S.row}><div style={{ ...S.iBox, background: si.bill_status === 'due' ? 'var(--red-light)' : 'var(--green-light)' }}><span style={{ fontSize: 16 }}>{si.bill_status === 'due' ? '⏳' : '✅'}</span></div><div style={{ flex: 1, minWidth: 0 }}><p style={S.cT}>{si.title}</p><p style={S.cS}>{si.sold_buyer || 'Walk-in'} · {fmtTs(si.sold_at)}</p>{noteCount > 0 && <Pill text={`${noteCount} issue${noteCount > 1 ? 's' : ''}`} color="#92400E" bg="#FEF3C7" />}</div><div style={{ textAlign: 'right', flexShrink: 0 }}><p style={{ fontSize: 15, fontWeight: 700 }}>{fmt(si.sold_price)}</p><p style={{ fontSize: 12, fontWeight: 600, color: p >= 0 ? 'var(--green)' : 'var(--red)' }}>{p >= 0 ? '+' : ''}{fmt(si.profit)}</p><Pill text={si.bill_status === 'due' ? 'Due' : 'Paid'} ok={si.bill_status !== 'due'} /></div></div>
-    <div style={S.acts}>{onMarkPaid && <button style={{ ...S.chip, background: 'var(--green-light)', color: 'var(--green)', fontWeight: 600 }} onClick={onMarkPaid}>✅ Paid</button>}<button style={{ ...S.chip, background: 'var(--accent-light)', color: 'var(--accent)', fontWeight: 600 }} onClick={onBill}>🧾</button><button style={S.chip} onClick={onNote}>💬{noteCount > 0 ? ` ${noteCount}` : ''}</button><button style={S.chip} onClick={onShare}>📤</button><button style={S.chip} onClick={onLC}>🔄</button></div>
+    <div style={S.acts}>{onMarkPaid && <button style={{ ...S.chip, background: 'var(--green-light)', color: 'var(--green)', fontWeight: 600 }} onClick={onMarkPaid}>✅ Paid</button>}<button style={{ ...S.chip, background: 'var(--accent-light)', color: 'var(--accent)', fontWeight: 600 }} onClick={onBill}>🧾</button>{onEdit && <button style={S.chip} onClick={onEdit}>✏️ Edit</button>}{onReturn && <button style={S.chip} onClick={onReturn}>↩</button>}<button style={S.chip} onClick={onNote}>💬{noteCount > 0 ? ` ${noteCount}` : ''}</button><button style={S.chip} onClick={onShare}>📤</button><button style={S.chip} onClick={onLC}>🔄</button></div>
   </div>;
 }
 
