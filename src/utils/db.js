@@ -84,6 +84,28 @@ export async function getPhotoUrls(itemId, soldItemId) {
   return await Promise.all((data || []).map(async (p) => { const { data: u } = await supabase.storage.from('product-photos').createSignedUrl(p.file_path, 3600); return { ...p, url: u?.signedUrl }; }));
 }
 
+// Get first photo thumbnail for all items (bulk load)
+export async function getAllThumbnails() {
+  const { data, error } = await supabase.from('item_photos').select('*').order('created_at', { ascending: true });
+  if (error) throw error;
+  if (!data || !data.length) return {};
+  // Group by item_id, keep only first photo per item
+  const firstByItem = {};
+  for (const p of data) {
+    const key = p.item_id || p.sold_item_id;
+    if (key && !firstByItem[key]) firstByItem[key] = p;
+  }
+  // Get signed URLs for each thumbnail
+  const result = {};
+  await Promise.all(Object.entries(firstByItem).map(async ([itemId, photo]) => {
+    try {
+      const { data: u } = await supabase.storage.from('product-photos').createSignedUrl(photo.file_path, 3600);
+      result[itemId] = [{ ...photo, url: u?.signedUrl }];
+    } catch (e) { /* skip */ }
+  }));
+  return result;
+}
+
 // ─── Nuke ───
 export async function clearAllData() {
   const user = await getUser(); if (!user) return;
