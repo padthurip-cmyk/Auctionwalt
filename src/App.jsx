@@ -126,6 +126,28 @@ export default function App() {
         notify('err', 'Could not extract items from this invoice. Try a clearer image or PDF.');
         return;
       }
+      // ── Duplicate check: match by invoice_number + auction_house, or by grand_total + date + auction_house ──
+      const ri = result.invoice;
+      const dup = invoices.find(existing => {
+        // Match 1: Same invoice number + same auction house
+        if (ri.invoice_number && existing.invoice_number && ri.auction_house && existing.auction_house) {
+          if (ri.invoice_number.toString().trim().toLowerCase() === existing.invoice_number.toString().trim().toLowerCase() &&
+              ri.auction_house.trim().toLowerCase() === existing.auction_house.trim().toLowerCase()) return true;
+        }
+        // Match 2: Same auction house + same date + same grand total (fallback if invoice # is missing)
+        if (ri.auction_house && existing.auction_house && ri.date && existing.date &&
+            ri.auction_house.trim().toLowerCase() === existing.auction_house.trim().toLowerCase() &&
+            ri.date === existing.date &&
+            ri.grand_total && existing.grand_total &&
+            Math.abs(parseFloat(ri.grand_total) - parseFloat(existing.grand_total)) < 0.01) return true;
+        return false;
+      });
+      if (dup) {
+        setUploadBusy(false);
+        if (fileRef.current) fileRef.current.value = '';
+        notify('err', `Duplicate invoice! "${dup.auction_house} #${dup.invoice_number}" (${fmtDate(dup.date)}) already exists.`);
+        return;
+      }
       const tempId = uid();
       const filePath = await db.uploadInvoiceFile(tempId, b64, file.name, file.type);
       const newInv = await db.insertInvoice({ date: result.invoice.date, auction_house: result.invoice.auction_house, invoice_number: result.invoice.invoice_number, event_description: result.invoice.event_description, payment_method: result.invoice.payment_method, payment_status: result.invoice.payment_status || 'Due', pickup_location: result.invoice.pickup_location, buyer_premium_rate: result.invoice.buyer_premium_rate, tax_rate: result.invoice.tax_rate, lot_total: result.invoice.lot_total, premium_total: result.invoice.premium_total, tax_total: result.invoice.tax_total, grand_total: result.invoice.grand_total, file_name: file.name, file_type: file.type, file_path: filePath, item_count: result.items.length });
@@ -141,7 +163,7 @@ export default function App() {
       notify('err', `Upload failed: ${err.message}`);
     }
     if (fileRef.current) fileRef.current.value = '';
-  }, [notify, load]);
+  }, [notify, load, invoices]);
 
   const openInvoice = useCallback(async (inv) => { setModal({ type: 'invoiceView', data: inv }); setInvDetailTab('items'); setViewInvUrl(null); setInvPrintSelections({}); const detailItems = await db.getItemsByInvoice(inv.id); setInvDetailItems(detailItems); if (inv.file_path) setViewInvUrl(await db.getInvoiceFileUrl(inv.file_path)); const lotMap = {}; detailItems.forEach(it => { lotMap[it.id] = it.lot_number || ''; }); setInvItemLots(lotMap); for (const it of detailItems) { loadPhotos(it.id); } }, [loadPhotos]);
   const handleInvStatus = useCallback(async (inv, st) => { await db.updateInvoice(inv.id, { payment_status: st }); await load(); notify('ok', `→ ${st}`); }, [load, notify]);
