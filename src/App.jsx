@@ -5,9 +5,9 @@ import { uid, fmt, fmtDate, fmtTs, readFileAsBase64, openWhatsApp, openSMS, prin
 
 const TABS = [
   { id: 'home', icon: '🏠', label: 'Home' },
+  { id: 'invoices', icon: '📄', label: 'Invoices' },
   { id: 'inventory', icon: '📦', label: 'Stock' },
   { id: 'sales', icon: '💰', label: 'Sales' },
-  { id: 'issues', icon: '⚠️', label: 'Issues' },
   { id: 'account', icon: '👤', label: 'Me' },
 ];
 const INV_FILTERS = ['All', 'For Sale', 'Personal', 'Pending', 'Listed'];
@@ -68,6 +68,9 @@ export default function App() {
   const fileRef = useRef(null);
   const [invPhotoItemId, setInvPhotoItemId] = useState(null);
   const [invPhotoLot, setInvPhotoLot] = useState('');
+  const [invStatusFilter, setInvStatusFilter] = useState('All');
+  const [invSearch, setInvSearch] = useState('');
+  const [uploadBusy, setUploadBusy] = useState(false);
 
   const notify = useCallback((t, m) => { setToast({ t, m }); setTimeout(() => setToast(null), 4000); }, []);
   const closeModal = () => { setModal(null); setReceiptHtml(''); setBillHtml(''); setViewInvUrl(null); setInvDetailItems([]); setInvDetailTab('items'); setLcEvents([]); setEmailTo(''); setBillItems([]); setBillSearch(''); setItemNotes([]); setNoteForm({ category: 'product_defect', note: '' }); setSf({ amount: '', platform: '', buyer: '', buyerEmail: '', buyerPhone: '', billStatus: 'paid', includeHst: true, listingUrl: '' }); setExtractBusy(false); setExtractData(null); setInvItemLots({}); setInvPrintSelections({}); setInvPhotoItemId(null); setInvPhotoLot(''); };
@@ -97,10 +100,12 @@ export default function App() {
 
   const handleUpload = useCallback(async (e) => {
     const file = e.target.files?.[0]; if (!file) return;
-    notify('info', 'Claude AI analyzing...');
+    setUploadBusy(true);
+    notify('info', 'Analyzing invoice...');
     try {
       const b64 = await readFileAsBase64(file);
       const result = await parseInvoiceAI(b64, file.type);
+      if (!result || !result.invoice || !result.items) throw new Error('Could not read invoice. Try a clearer image or PDF.');
       const tempId = uid();
       const filePath = await db.uploadInvoiceFile(tempId, b64, file.name, file.type);
       const newInv = await db.insertInvoice({ date: result.invoice.date, auction_house: result.invoice.auction_house, invoice_number: result.invoice.invoice_number, event_description: result.invoice.event_description, payment_method: result.invoice.payment_method, payment_status: result.invoice.payment_status || 'Due', pickup_location: result.invoice.pickup_location, buyer_premium_rate: result.invoice.buyer_premium_rate, tax_rate: result.invoice.tax_rate, lot_total: result.invoice.lot_total, premium_total: result.invoice.premium_total, tax_total: result.invoice.tax_total, grand_total: result.invoice.grand_total, file_name: file.name, file_type: file.type, file_path: filePath, item_count: result.items.length });
@@ -109,8 +114,9 @@ export default function App() {
       const inserted = await db.insertItems(rows);
       const now = new Date().toISOString();
       await db.addLifecycleEvents(inserted.flatMap(it => [{ item_id: it.id, event: 'Purchased', detail: `${result.invoice.auction_house}`, created_at: now }, { item_id: it.id, event: 'In Inventory', detail: `Lot #${it.lot_number} · ${fmt(it.total_cost)}`, created_at: now }]));
-      await load(); notify('ok', `${result.items.length} items from ${result.invoice.auction_house}`);
-    } catch (err) { notify('err', err.message); }
+      await load(); notify('ok', `✅ ${result.items.length} items from ${result.invoice.auction_house}`);
+    } catch (err) { notify('err', `Upload failed: ${err.message}`); }
+    setUploadBusy(false);
     if (fileRef.current) fileRef.current.value = '';
   }, [notify, load]);
 
@@ -208,21 +214,69 @@ export default function App() {
       {toast&&<div className="fade-up" style={{...S.toast,background:toast.t==='ok'?'var(--green)':toast.t==='err'?'var(--red)':'var(--accent)'}}>{toast.t==='info'&&<div style={S.miniSpin}/>}{toast.m}</div>}
       {billBusy&&<div style={S.fullOL}><div style={S.spin}/><p style={{color:'#fff',marginTop:12}}>Generating Bill...</p></div>}
 
+      {/* Upload busy overlay */}
+      {uploadBusy&&<div style={S.fullOL}><div style={S.spin}/><p style={{color:'#fff',marginTop:12,fontSize:15,fontWeight:600}}>Analyzing Invoice...</p><p style={{color:'rgba(255,255,255,.6)',fontSize:12,marginTop:4}}>This may take up to 30 seconds</p></div>}
+
       <main style={S.main}>
-        {/* HOME */}
+        {/* HOME — Dashboard + Quick Actions */}
         {tab==='home'&&<>
           <div style={S.hdr}><p style={{fontSize:13,color:'var(--text-muted)',letterSpacing:.3}}>DASHBOARD</p><h1 style={{fontSize:24,fontWeight:800}}>Auction Vault</h1></div>
           <div style={{display:'grid',gridTemplateColumns:'repeat(3,1fr)',gap:8,marginBottom:16}}>
             {[{l:'Stock',v:items.length,s:fmt(invValue),c:'var(--accent)'},{l:'Revenue',v:fmt(totalRev),s:`${sold.length} sold`,c:'var(--green)'},{l:'Profit',v:`${totalProfit>=0?'+':''}${fmt(totalProfit)}`,s:totalSpent>0?`${((totalProfit/totalSpent)*100).toFixed(0)}% ROI`:'—',c:totalProfit>=0?'var(--green)':'var(--red)'}].map(s=><div key={s.l} style={{...S.card,padding:'14px 12px',borderLeft:`3px solid ${s.c}`}}><p style={{fontSize:10,color:'var(--text-muted)',textTransform:'uppercase',letterSpacing:.5,marginBottom:4}}>{s.l}</p><p style={{fontSize:18,fontWeight:700,color:s.c,fontFamily:'var(--font-mono)'}}>{s.v}</p><p style={{fontSize:11,color:'var(--text-secondary)',marginTop:2}}>{s.s}</p></div>)}
           </div>
-          <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:10,marginBottom:20}}>
-            <label role="button" style={S.qAct}><input ref={fileRef} type="file" accept=".pdf,.png,.jpg,.jpeg,.webp" onChange={handleUpload} style={{display:'none'}}/><span style={{fontSize:28,marginBottom:4}}>📄</span><span style={{fontSize:13,fontWeight:700}}>Upload Invoice</span></label>
+          {/* Quick actions */}
+          <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:10,marginBottom:16}}>
+            <label role="button" style={{...S.qAct,opacity:uploadBusy?.5:1,pointerEvents:uploadBusy?'none':'auto'}}><input ref={fileRef} type="file" accept=".pdf,.png,.jpg,.jpeg,.webp" onChange={handleUpload} style={{display:'none'}}/><span style={{fontSize:28,marginBottom:4}}>{uploadBusy?'⏳':'📄'}</span><span style={{fontSize:13,fontWeight:700}}>{uploadBusy?'Analyzing...':'Upload Invoice'}</span></label>
             <div style={S.qAct} onClick={()=>{setTab('sales');setSaleFilter('New Bill');setModal({type:'billOfSale'});}}><span style={{fontSize:28,marginBottom:4}}>🧾</span><span style={{fontSize:13,fontWeight:700}}>Bill of Sale</span></div>
           </div>
-          {openNotes.length>0&&<div style={{...S.card,marginBottom:10,background:'#FEF3C7',border:'1px solid #F59E0B',padding:'14px 16px',display:'flex',justifyContent:'space-between',alignItems:'center'}}><div><p style={{fontSize:14,fontWeight:700,color:'#92400E'}}>⚠️ {openNotes.length} Open Issue{openNotes.length>1?'s':''}</p></div><button style={{...S.chip,background:'#F59E0B',color:'#fff',fontWeight:700}} onClick={()=>setTab('issues')}>View</button></div>}
+          {/* Summary cards */}
+          <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:8,marginBottom:16}}>
+            <div style={{...S.card,padding:'14px 16px',cursor:'pointer'}} onClick={()=>setTab('invoices')}><p style={{fontSize:22,fontWeight:800,color:'var(--accent)'}}>{invoices.length}</p><p style={{fontSize:12,color:'var(--text-muted)'}}>Invoices</p></div>
+            <div style={{...S.card,padding:'14px 16px',cursor:'pointer'}} onClick={()=>setTab('inventory')}><p style={{fontSize:22,fontWeight:800,color:'var(--accent)'}}>{items.length}</p><p style={{fontSize:12,color:'var(--text-muted)'}}>Items in Stock</p></div>
+          </div>
+          {/* Alerts */}
+          {openNotes.length>0&&<div style={{...S.card,marginBottom:10,background:'#FEF3C7',border:'1px solid #F59E0B',padding:'14px 16px',display:'flex',justifyContent:'space-between',alignItems:'center'}}><div><p style={{fontSize:14,fontWeight:700,color:'#92400E'}}>⚠️ {openNotes.length} Open Issue{openNotes.length>1?'s':''}</p></div><button style={{...S.chip,background:'#F59E0B',color:'#fff',fontWeight:700}} onClick={()=>{setTab('account');setIssueFilter('Open');}}>View</button></div>}
           {dueBills.length>0&&<div style={{...S.card,marginBottom:10,background:'var(--red-light)',border:'1px solid var(--red)',padding:'14px 16px',display:'flex',justifyContent:'space-between',alignItems:'center'}}><div><p style={{fontSize:14,fontWeight:700,color:'var(--red)'}}>💸 {dueBills.length} Unpaid</p><p style={{fontSize:12,color:'var(--text-secondary)'}}>{fmt(dueBills.reduce((s,i)=>s+parseFloat(i.sold_price||0),0))}</p></div><button style={{...S.chip,background:'var(--red)',color:'#fff',fontWeight:700}} onClick={()=>{setTab('sales');setSaleFilter('Due');}}>View</button></div>}
-          <p style={S.secT}>Recent Invoices</p>
-          {invoices.length===0?<Empty text="Upload your first invoice"/>:invoices.slice(0,8).map((inv,i)=><div key={inv.id} className="fade-up" style={{...S.card,marginBottom:8,animationDelay:`${i*30}ms`,cursor:'pointer'}} onClick={()=>openInvoice(inv)}><div style={{display:'flex',gap:12,padding:'14px 16px',alignItems:'center'}}><div style={{width:42,height:42,borderRadius:12,background:inv.payment_status==='Paid'?'var(--green-light)':'var(--red-light)',display:'flex',alignItems:'center',justifyContent:'center',flexShrink:0,fontSize:18}}>{inv.payment_status==='Paid'?'✅':'⏳'}</div><div style={{flex:1,minWidth:0}}><p style={{fontSize:15,fontWeight:600,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{inv.auction_house}</p><p style={{fontSize:12,color:'var(--text-muted)'}}>{fmtDate(inv.date)} · {inv.item_count} items</p></div><div style={{textAlign:'right'}}><p style={{fontSize:16,fontWeight:700,color:'var(--accent)'}}>{fmt(inv.grand_total)}</p><Tag text={inv.payment_status||'Due'} ok={inv.payment_status==='Paid'}/></div></div></div>)}
+          {/* Recent 3 invoices as quick-access */}
+          {invoices.length>0&&<>
+            <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:8}}><p style={S.secT}>Recent Invoices</p><button style={{...S.chip,fontSize:12,fontWeight:600,color:'var(--accent)'}} onClick={()=>setTab('invoices')}>View All →</button></div>
+            {invoices.slice(0,3).map((inv,i)=><div key={inv.id} className="fade-up" style={{...S.card,marginBottom:8,animationDelay:`${i*30}ms`,cursor:'pointer'}} onClick={()=>openInvoice(inv)}><div style={{display:'flex',gap:12,padding:'14px 16px',alignItems:'center'}}><div style={{width:42,height:42,borderRadius:12,background:inv.payment_status==='Paid'?'var(--green-light)':'var(--red-light)',display:'flex',alignItems:'center',justifyContent:'center',flexShrink:0,fontSize:18}}>{inv.payment_status==='Paid'?'✅':'⏳'}</div><div style={{flex:1,minWidth:0}}><p style={{fontSize:15,fontWeight:600,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{inv.auction_house}</p><p style={{fontSize:12,color:'var(--text-muted)'}}>{fmtDate(inv.date)} · {inv.item_count} items</p></div><div style={{textAlign:'right'}}><p style={{fontSize:16,fontWeight:700,color:'var(--accent)'}}>{fmt(inv.grand_total)}</p><Tag text={inv.payment_status||'Due'} ok={inv.payment_status==='Paid'}/></div></div></div>)}
+          </>}
+        </>}
+
+        {/* INVOICES — ALL invoices with search + filter */}
+        {tab==='invoices'&&<>
+          <div style={S.hdr}>
+            <div style={{display:'flex',justifyContent:'space-between',alignItems:'center'}}>
+              <div><h1 style={{fontSize:24,fontWeight:800}}>Invoices</h1><p style={{fontSize:13,color:'var(--text-muted)'}}>{invoices.length} total · {fmt(invoices.reduce((s,i)=>s+parseFloat(i.grand_total||0),0))}</p></div>
+              <label role="button" style={{...S.btn1,padding:'10px 16px',fontSize:13,opacity:uploadBusy?.5:1}}><input ref={fileRef} type="file" accept=".pdf,.png,.jpg,.jpeg,.webp" onChange={handleUpload} style={{display:'none'}}/>{uploadBusy?'⏳ Analyzing...':'📄 Upload'}</label>
+            </div>
+          </div>
+          {/* Status filter pills */}
+          <div style={S.pills}>{['All','Paid','Due'].map(f=><button key={f} style={{...S.pill,...(invStatusFilter===f?S.pillOn:{})}} onClick={()=>setInvStatusFilter(f)}>{f}{f==='Due'?` (${invoices.filter(i=>i.payment_status!=='Paid').length})`:f==='Paid'?` (${invoices.filter(i=>i.payment_status==='Paid').length})`:` (${invoices.length})`}</button>)}</div>
+          {/* Search */}
+          <input style={{...S.inp,marginBottom:12}} placeholder="Search auction house, invoice #..." value={invSearch} onChange={e=>setInvSearch(e.target.value)}/>
+          {/* Invoice list */}
+          {(()=>{
+            let list = invoices;
+            if(invStatusFilter==='Paid') list=list.filter(i=>i.payment_status==='Paid');
+            if(invStatusFilter==='Due') list=list.filter(i=>i.payment_status!=='Paid');
+            if(invSearch){const q=invSearch.toLowerCase(); list=list.filter(i=>[i.auction_house,i.invoice_number,i.event_description].some(f=>f?.toLowerCase?.().includes(q)));}
+            if(list.length===0) return <Empty text={invSearch?'No matching invoices':'No invoices yet. Upload one!'}/>;
+            return list.map((inv,i)=><div key={inv.id} className="fade-up" style={{...S.card,marginBottom:8,animationDelay:`${i*25}ms`,cursor:'pointer'}} onClick={()=>openInvoice(inv)}>
+              <div style={{display:'flex',gap:12,padding:'14px 16px',alignItems:'center'}}>
+                <div style={{width:44,height:44,borderRadius:12,background:inv.payment_status==='Paid'?'var(--green-light)':'var(--red-light)',display:'flex',alignItems:'center',justifyContent:'center',flexShrink:0,fontSize:18}}>{inv.payment_status==='Paid'?'✅':'⏳'}</div>
+                <div style={{flex:1,minWidth:0}}>
+                  <p style={{fontSize:15,fontWeight:600,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{inv.auction_house}</p>
+                  <p style={{fontSize:12,color:'var(--text-muted)'}}>{fmtDate(inv.date)} · #{inv.invoice_number} · {inv.item_count} items</p>
+                </div>
+                <div style={{textAlign:'right',flexShrink:0}}>
+                  <p style={{fontSize:16,fontWeight:700,color:'var(--accent)'}}>{fmt(inv.grand_total)}</p>
+                  <Tag text={inv.payment_status||'Due'} ok={inv.payment_status==='Paid'}/>
+                </div>
+              </div>
+            </div>);
+          })()}
         </>}
 
         {/* INVENTORY */}
@@ -266,17 +320,18 @@ export default function App() {
           {saleFilter==='Closed'&&<div>{closedBills.length===0?<Empty text="No closed bills"/>:closedBills.map((si,i)=><SC key={si.id} si={si} i={i} onBill={()=>viewBill(si)} onShare={()=>setModal({type:'share',data:si})} onLC={()=>handleLC(si,true)} onNote={()=>{setModal({type:'notes',data:si,isSold:true});loadItemNotes(null,si.id);}} onEdit={()=>openEditSold(si)} onReturn={()=>returnToInventory(si)} noteCount={allNotes.filter(n=>n.sold_item_id===si.id&&!n.is_resolved).length}/>)}</div>}
         </>}
 
-        {/* ISSUES */}
-        {tab==='issues'&&<>
-          <div style={S.hdr}><h1 style={{fontSize:24,fontWeight:800}}>Issues</h1><p style={{fontSize:13,color:'var(--text-muted)'}}>{openNotes.length} open · {resolvedNotes.length} resolved</p></div>
-          <div style={S.pills}>{ISSUE_FILTERS.map(f=><button key={f} style={{...S.pill,...(issueFilter===f?S.pillOn:{})}} onClick={()=>setIssueFilter(f)}>{f}{f==='Open'&&openNotes.length?` (${openNotes.length})`:''}</button>)}</div>
-          {(()=>{const notes=issueFilter==='Open'?openNotes:issueFilter==='Resolved'?resolvedNotes:allNotes;if(notes.length===0)return<Empty text={issueFilter==='Open'?'All clear!':'No notes'}/>;return notes.map((note,i)=>{const cat=getCat(note.category);return<div key={note.id} className="fade-up" style={{...S.card,marginBottom:8,animationDelay:`${i*20}ms`,borderLeft:`3px solid ${cat.color}`,opacity:note.is_resolved?.6:1,padding:'14px 16px'}}><div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:6}}><span style={{fontSize:12,fontWeight:600,color:cat.color,padding:'3px 10px',borderRadius:6,background:cat.bg}}>{cat.icon} {cat.label}</span>{note.is_resolved&&<Tag text="Resolved" color="var(--green)" bg="var(--green-light)"/>}</div><p style={{fontSize:14,fontWeight:600,marginBottom:2}}>{noteItemName(note)}</p><p style={{fontSize:14,color:'var(--text)',lineHeight:1.4,marginBottom:4}}>{note.note}</p><p style={{fontSize:11,color:'var(--text-muted)'}}>{fmtTs(note.created_at)}</p>{!note.is_resolved&&<div style={{display:'flex',gap:6,marginTop:8}}><button style={{...S.chip,background:'var(--green-light)',color:'var(--green)',fontWeight:700}} onClick={()=>resolveNote(note.id,note.item_id,note.sold_item_id)}>✅ Resolve</button><button style={{...S.chip,color:'var(--red)'}} onClick={()=>deleteNoteById(note.id,note.item_id,note.sold_item_id)}>🗑 Delete</button></div>}</div>;});})()}
-        </>}
-
-        {/* ACCOUNT */}
+        {/* ACCOUNT + ISSUES merged */}
         {tab==='account'&&<>
           <div style={S.hdr}><h1 style={{fontSize:24,fontWeight:800}}>Account</h1></div>
           <div style={{...S.card,padding:16,marginBottom:12,display:'flex',justifyContent:'space-between',alignItems:'center'}}><p style={{fontSize:14,fontWeight:600}}>{user?.email}</p><button style={{...S.chip,color:'var(--red)',fontWeight:600}} onClick={()=>db.signOut()}>Sign Out</button></div>
+
+          {/* Issues section inside Account */}
+          {(openNotes.length>0||resolvedNotes.length>0)&&<>
+            <p style={S.secT}>Issues & Notes ({openNotes.length} open)</p>
+            <div style={S.pills}>{ISSUE_FILTERS.map(f=><button key={f} style={{...S.pill,...(issueFilter===f?S.pillOn:{})}} onClick={()=>setIssueFilter(f)}>{f}{f==='Open'&&openNotes.length?` (${openNotes.length})`:''}</button>)}</div>
+            {(()=>{const notes=issueFilter==='Open'?openNotes:issueFilter==='Resolved'?resolvedNotes:allNotes;if(notes.length===0)return<p style={{color:'var(--text-muted)',fontSize:13,textAlign:'center',padding:16}}>{issueFilter==='Open'?'All clear!':'No notes'}</p>;return notes.slice(0,10).map((note,i)=>{const cat=getCat(note.category);return<div key={note.id} className="fade-up" style={{...S.card,marginBottom:8,animationDelay:`${i*20}ms`,borderLeft:`3px solid ${cat.color}`,opacity:note.is_resolved?.6:1,padding:'14px 16px'}}><div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:6}}><span style={{fontSize:12,fontWeight:600,color:cat.color,padding:'3px 10px',borderRadius:6,background:cat.bg}}>{cat.icon} {cat.label}</span>{note.is_resolved&&<Tag text="Resolved" color="var(--green)" bg="var(--green-light)"/>}</div><p style={{fontSize:14,fontWeight:600,marginBottom:2}}>{noteItemName(note)}</p><p style={{fontSize:14,color:'var(--text)',lineHeight:1.4,marginBottom:4}}>{note.note}</p><p style={{fontSize:11,color:'var(--text-muted)'}}>{fmtTs(note.created_at)}</p>{!note.is_resolved&&<div style={{display:'flex',gap:6,marginTop:8}}><button style={{...S.chip,background:'var(--green-light)',color:'var(--green)',fontWeight:700}} onClick={()=>resolveNote(note.id,note.item_id,note.sold_item_id)}>✅ Resolve</button><button style={{...S.chip,color:'var(--red)'}} onClick={()=>deleteNoteById(note.id,note.item_id,note.sold_item_id)}>🗑 Delete</button></div>}</div>;});})()}
+          </>}
+
           <p style={S.secT}>Business Info</p>
           <div style={{...S.card,padding:16}}>
             {[['Business Name','business_name'],['Address','address'],['Phone','phone'],['Email','email'],['HST #','hst']].map(([l,k])=><div key={k}><label style={S.label}>{l}</label><input style={S.inp} value={biz[k]||''} onChange={e=>setBiz({...biz,[k]:e.target.value})}/></div>)}
@@ -287,7 +342,7 @@ export default function App() {
       </main>
 
       {/* NAV */}
-      <nav style={S.nav}>{TABS.map(t=><button key={t.id} onClick={()=>{setTab(t.id);setSearch('');}} style={{...S.navBtn,color:tab===t.id?'var(--accent)':'var(--text-muted)'}}><span style={{fontSize:20}}>{t.icon}</span><span style={{fontSize:10,fontWeight:tab===t.id?700:400,marginTop:1}}>{t.label}</span>{t.id==='inventory'&&items.length>0&&<span style={S.badge}>{items.length}</span>}{t.id==='sales'&&dueBills.length>0&&<span style={{...S.badge,background:'var(--red)'}}>{dueBills.length}</span>}{t.id==='issues'&&openNotes.length>0&&<span style={{...S.badge,background:'#F59E0B'}}>{openNotes.length}</span>}</button>)}</nav>
+      <nav style={S.nav}>{TABS.map(t=><button key={t.id} onClick={()=>{setTab(t.id);setSearch('');setInvSearch('');}} style={{...S.navBtn,color:tab===t.id?'var(--accent)':'var(--text-muted)'}}><span style={{fontSize:20}}>{t.icon}</span><span style={{fontSize:10,fontWeight:tab===t.id?700:400,marginTop:1}}>{t.label}</span>{t.id==='invoices'&&invoices.length>0&&<span style={S.badge}>{invoices.length}</span>}{t.id==='inventory'&&items.length>0&&<span style={S.badge}>{items.length}</span>}{t.id==='sales'&&dueBills.length>0&&<span style={{...S.badge,background:'var(--red)'}}>{dueBills.length}</span>}{t.id==='account'&&openNotes.length>0&&<span style={{...S.badge,background:'#F59E0B'}}>{openNotes.length}</span>}</button>)}</nav>
 
       {/* ═══ MODALS ═══ */}
 
