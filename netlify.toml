@@ -10,9 +10,19 @@
 # Large PDFs with Claude API need 15-30 seconds
 [functions."parse-invoice"]
   external_node_modules = []
+  timeout = 26
 
 [functions."generate-receipt"]
   external_node_modules = []
+  timeout = 26
+
+[functions."generate-bill"]
+  external_node_modules = []
+  timeout = 26
+
+[functions."extract-listing"]
+  external_node_modules = []
+  timeout = 26
 
 [[redirects]]
   from = "/api/*"
