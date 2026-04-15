@@ -65,10 +65,15 @@ export default function App() {
   const [noteForm, setNoteForm] = useState({ category: 'product_defect', note: '' });
   const [billItems, setBillItems] = useState([]);
   const [billSearch, setBillSearch] = useState('');
+  const [invItemLots, setInvItemLots] = useState({});
+  const [invPrintSelections, setInvPrintSelections] = useState({});
   const fileRef = useRef(null);
+  const invPhotoRef = useRef(null);
+  const [invPhotoItemId, setInvPhotoItemId] = useState(null);
+  const [invPhotoLot, setInvPhotoLot] = useState('');
 
   const notify = useCallback((t, m) => { setToast({ t, m }); setTimeout(() => setToast(null), 4000); }, []);
-  const closeModal = () => { setModal(null); setReceiptHtml(''); setBillHtml(''); setViewInvUrl(null); setInvDetailItems([]); setInvDetailTab('items'); setLcEvents([]); setEmailTo(''); setBillItems([]); setBillSearch(''); setItemNotes([]); setNoteForm({ category: 'product_defect', note: '' }); setSf({ amount: '', platform: '', buyer: '', buyerEmail: '', buyerPhone: '', billStatus: 'paid', includeHst: true, listingUrl: '' }); setExtractBusy(false); setExtractData(null); };
+  const closeModal = () => { setModal(null); setReceiptHtml(''); setBillHtml(''); setViewInvUrl(null); setInvDetailItems([]); setInvDetailTab('items'); setLcEvents([]); setEmailTo(''); setBillItems([]); setBillSearch(''); setItemNotes([]); setNoteForm({ category: 'product_defect', note: '' }); setSf({ amount: '', platform: '', buyer: '', buyerEmail: '', buyerPhone: '', billStatus: 'paid', includeHst: true, listingUrl: '' }); setExtractBusy(false); setExtractData(null); setInvItemLots({}); setInvPrintSelections({}); setInvPhotoItemId(null); setInvPhotoLot(''); };
 
   // Auth
   useEffect(() => {
@@ -123,8 +128,86 @@ export default function App() {
   }, [notify, load]);
 
   // Invoice
-  const openInvoice = useCallback(async (inv) => { setModal({ type: 'invoiceView', data: inv }); setInvDetailTab('items'); setViewInvUrl(null); setInvDetailItems(await db.getItemsByInvoice(inv.id)); if (inv.file_path) setViewInvUrl(await db.getInvoiceFileUrl(inv.file_path)); }, []);
+  const openInvoice = useCallback(async (inv) => { setModal({ type: 'invoiceView', data: inv }); setInvDetailTab('items'); setViewInvUrl(null); setInvPrintSelections({}); const detailItems = await db.getItemsByInvoice(inv.id); setInvDetailItems(detailItems); if (inv.file_path) setViewInvUrl(await db.getInvoiceFileUrl(inv.file_path)); const lotMap = {}; detailItems.forEach(it => { lotMap[it.id] = it.lot_number || ''; }); setInvItemLots(lotMap); for (const it of detailItems) { loadPhotos(it.id); } }, [loadPhotos]);
   const handleInvStatus = useCallback(async (inv, st) => { await db.updateInvoice(inv.id, { payment_status: st }); await load(); notify('ok', `→ ${st}`); }, [load, notify]);
+
+  // Update lot number for an item
+  const handleUpdateLotNumber = useCallback(async (itemId, lotNumber) => {
+    try { await db.updateItem(itemId, { lot_number: lotNumber }); setInvDetailItems(prev => prev.map(it => it.id === itemId ? { ...it, lot_number: lotNumber } : it)); } catch (e) { notify('err', 'Failed to update lot number'); }
+  }, [notify]);
+
+  // Upload photo for invoice item with lot number
+  const handleInvItemPhoto = useCallback(async (itemId, e) => {
+    const files = Array.from(e.target.files || []); if (!files.length) return;
+    // If lot number was provided, save it first
+    if (invPhotoLot) { await handleUpdateLotNumber(itemId, invPhotoLot); setInvItemLots(prev => ({ ...prev, [itemId]: invPhotoLot })); }
+    // Show instant blob previews
+    const previews = files.map(f => ({ id: 'temp_' + Date.now() + Math.random(), url: URL.createObjectURL(f), file_name: f.name }));
+    setItemPhotos(prev => ({ ...prev, [itemId]: [...(prev[itemId] || []), ...previews] }));
+    for (const f of files) { try { await db.uploadPhoto(itemId, f); } catch (err) { console.error(err); } }
+    await loadPhotos(itemId);
+    setInvPhotoItemId(null); setInvPhotoLot('');
+    notify('ok', `${files.length} photo(s) saved`);
+  }, [notify, loadPhotos, invPhotoLot, handleUpdateLotNumber]);
+
+  // Print invoice items as PDF — 3 items per page, portrait, with photo + name + lot
+  const printInvoiceItems = useCallback((invoice, itemsToPrint) => {
+    const pages = [];
+    for (let i = 0; i < itemsToPrint.length; i += 3) { pages.push(itemsToPrint.slice(i, i + 3)); }
+    const pagesHTML = pages.map((pageItems, pi) => `
+      <div class="page${pi > 0 ? ' page-break' : ''}">
+        <div class="page-head">
+          <div class="hline"></div>
+          <h1>${invoice.auction_house || 'Invoice'}</h1>
+          <p class="sub">${invoice.invoice_number ? '#' + invoice.invoice_number : ''} ${invoice.date ? '· ' + invoice.date : ''}</p>
+          <div class="hline"></div>
+        </div>
+        <div class="items">
+          ${pageItems.map(item => {
+            const photos = itemPhotos[item.id] || [];
+            const photoUrl = photos.length > 0 && photos[0].url ? photos[0].url : null;
+            return `<div class="item-card">
+              <div class="item-photo">${photoUrl ? `<img src="${photoUrl}" />` : `<div class="no-photo">No Image</div>`}</div>
+              <div class="item-info">
+                <h2>${item.title || 'Untitled'}</h2>
+                ${item.lot_number ? `<p class="lot">Lot #${item.lot_number}</p>` : ''}
+              </div>
+            </div>`;
+          }).join('')}
+        </div>
+        <div class="page-foot">
+          <div class="hline"></div>
+          <p class="pn">Page ${pi + 1} of ${pages.length}</p>
+        </div>
+      </div>
+    `).join('');
+    const html = `<!DOCTYPE html><html><head><meta charset="utf-8"/><title>${invoice.auction_house || 'Invoice'} Items</title>
+    <style>
+      @page { size: A4 portrait; margin: 0; }
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+      body { font-family: -apple-system, 'Segoe UI', Arial, sans-serif; background: #fff; color: #1a1a1a; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+      .page { width: 210mm; min-height: 297mm; padding: 15mm 20mm; display: flex; flex-direction: column; position: relative; }
+      .page-break { page-break-before: always; }
+      .page-head { text-align: center; margin-bottom: 8mm; }
+      .page-head h1 { font-size: 18pt; font-weight: 700; margin: 3mm 0 1mm; }
+      .page-head .sub { font-size: 10pt; color: #666; letter-spacing: 0.5px; }
+      .hline { height: 1.5px; background: linear-gradient(90deg, transparent, #333 15%, #333 85%, transparent); margin: 3mm 0; }
+      .items { flex: 1; display: flex; flex-direction: column; gap: 6mm; }
+      .item-card { border: 1.5px solid #ddd; border-radius: 3mm; padding: 4mm; display: flex; align-items: center; gap: 5mm; min-height: 70mm; }
+      .item-photo { width: 60mm; height: 60mm; flex-shrink: 0; border-radius: 2mm; overflow: hidden; background: #f5f5f5; display: flex; align-items: center; justify-content: center; }
+      .item-photo img { width: 100%; height: 100%; object-fit: cover; }
+      .no-photo { color: #aaa; font-size: 11pt; text-align: center; }
+      .item-info { flex: 1; padding: 2mm 0; }
+      .item-info h2 { font-size: 14pt; font-weight: 700; margin-bottom: 2mm; line-height: 1.3; }
+      .item-info .lot { font-size: 13pt; color: #444; font-weight: 600; padding: 2mm 4mm; background: #f0f0f0; border-radius: 2mm; display: inline-block; margin-top: 2mm; }
+      .page-foot { text-align: center; margin-top: 5mm; }
+      .page-foot .pn { font-size: 9pt; color: #999; }
+      @media print { .page { padding: 12mm 18mm; } }
+    </style></head><body>${pagesHTML}</body></html>`;
+    const w = window.open('', '_blank', 'width=800,height=1000');
+    w.document.write(html); w.document.close();
+    setTimeout(() => { w.focus(); w.print(); }, 600);
+  }, [itemPhotos]);
 
   // Item actions
   const setItemPurpose = useCallback(async (item, p) => { await db.updateItem(item.id, { purpose: p }); await db.addLifecycleEvent({ item_id: item.id, event: p === 'personal' ? 'Personal' : 'For Sale' }); await load(); notify('ok', p === 'personal' ? 'Personal' : 'For sale'); }, [load, notify]);
@@ -462,7 +545,81 @@ export default function App() {
         <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 8 }}><div><h3 style={S.mT}>{modal.data.auction_house}</h3><p style={{ fontSize: 13, color: 'var(--text-secondary)' }}>{fmtDate(modal.data.date)} · #{modal.data.invoice_number}</p></div><Pill text={modal.data.payment_status || 'Due'} ok={modal.data.payment_status === 'Paid'} /></div>
         <div style={{ display: 'flex', gap: 6, marginBottom: 12 }}>{[['LOT', modal.data.lot_total], ['PREMIUM', modal.data.premium_total], ['TAX', modal.data.tax_total]].map(([l, v]) => <div key={l} style={{ flex: 1, background: 'var(--bg-surface)', borderRadius: 8, padding: '8px 10px', textAlign: 'center' }}><p style={{ fontSize: 9, color: 'var(--text-muted)' }}>{l}</p><p style={{ fontSize: 14, fontWeight: 600 }}>{fmt(v)}</p></div>)}<div style={{ flex: 1, background: 'var(--accent-light)', borderRadius: 8, padding: '8px 10px', textAlign: 'center' }}><p style={{ fontSize: 9, color: 'var(--accent)' }}>TOTAL</p><p style={{ fontSize: 14, fontWeight: 700, color: 'var(--accent)' }}>{fmt(modal.data.grand_total)}</p></div></div>
         <div style={{ display: 'flex', gap: 0, marginBottom: 12, border: '1px solid var(--border)', borderRadius: 10, overflow: 'hidden' }}><button style={{ ...S.segBtn, ...(invDetailTab === 'items' ? S.segAct : {}) }} onClick={() => setInvDetailTab('items')}>📊 Items ({invDetailItems.length})</button><button style={{ ...S.segBtn, ...(invDetailTab === 'original' ? S.segAct : {}) }} onClick={() => setInvDetailTab('original')}>📄 Original</button></div>
-        {invDetailTab === 'items' && (invDetailItems.length === 0 ? <div style={{ textAlign: 'center', padding: 20 }}><div style={S.spinner} /></div> : invDetailItems.map((it, idx) => <div key={it.id} style={{ padding: '10px 0', borderBottom: '1px solid var(--border-light)' }}><div style={{ display: 'flex', justifyContent: 'space-between', gap: 8 }}><div style={{ flex: 1, minWidth: 0 }}><p style={{ fontSize: 14, fontWeight: 600 }}>{idx + 1}. {it.title}</p><p style={{ fontSize: 12, color: 'var(--text-secondary)' }}>Lot #{it.lot_number}</p>{it.description && <p style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 2 }}>{it.description.slice(0, 100)}</p>}</div><div style={{ textAlign: 'right', flexShrink: 0 }}><p style={{ fontSize: 14, fontWeight: 700 }}>{fmt(it.hammer_price)}</p><p style={{ fontSize: 10, color: 'var(--text-muted)' }}>+{fmt(it.premium_amount)} +{fmt(it.tax_amount)}</p><p style={{ fontSize: 12, fontWeight: 600, color: 'var(--accent)' }}>{fmt(it.total_cost)}</p></div></div></div>))}
+
+        {/* ── ITEMS TAB with photos, lot edit, print ── */}
+        {invDetailTab === 'items' && (invDetailItems.length === 0 ? <div style={{ textAlign: 'center', padding: 20 }}><div style={S.spinner} /></div> : <>
+          {/* Print buttons */}
+          <div style={{ display: 'flex', gap: 8, marginBottom: 12 }}>
+            <button style={{ ...S.btnP, flex: 1, fontSize: 13, padding: '10px 12px', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6 }} onClick={() => printInvoiceItems(modal.data, invDetailItems)}>🖨 Print All Items</button>
+            {Object.values(invPrintSelections).some(v => v) && <button style={{ ...S.btnO, flex: 1, fontSize: 13, padding: '10px 12px', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6 }} onClick={() => { const selected = invDetailItems.filter(it => invPrintSelections[it.id]); if (selected.length) printInvoiceItems(modal.data, selected); else notify('err', 'Select items first'); }}>🖨 Print Selected ({Object.values(invPrintSelections).filter(Boolean).length})</button>}
+          </div>
+
+          {/* Items list */}
+          {invDetailItems.map((it, idx) => {
+            const photos = itemPhotos[it.id] || [];
+            const hasPhoto = photos.length > 0 && photos[0].url;
+            const isUploading = invPhotoItemId === it.id;
+            return <div key={it.id} style={{ padding: '12px 0', borderBottom: '1px solid var(--border-light)' }}>
+              {/* Select checkbox + item header */}
+              <div style={{ display: 'flex', gap: 10, alignItems: 'flex-start' }}>
+                {/* Select for print */}
+                <button onClick={() => setInvPrintSelections(prev => ({ ...prev, [it.id]: !prev[it.id] }))} style={{ width: 22, height: 22, borderRadius: 6, border: invPrintSelections[it.id] ? '2px solid var(--accent)' : '2px solid var(--border)', background: invPrintSelections[it.id] ? 'var(--accent)' : 'transparent', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', flexShrink: 0, marginTop: 2 }}>{invPrintSelections[it.id] && <span style={{ color: '#fff', fontSize: 12, fontWeight: 700 }}>✓</span>}</button>
+
+                {/* Thumbnail */}
+                <div style={{ width: 56, height: 56, borderRadius: 8, overflow: 'hidden', background: 'var(--bg-surface)', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0, cursor: 'pointer', border: '1px solid var(--border-light)' }} onClick={() => { if (!isUploading) { setInvPhotoItemId(it.id); setInvPhotoLot(it.lot_number || ''); } }}>
+                  {hasPhoto ? <img src={photos[0].url} alt="" style={{ width: '100%', height: '100%', objectFit: 'cover' }} /> : <span style={{ fontSize: 22, color: 'var(--text-hint)' }}>📷</span>}
+                </div>
+
+                {/* Item info */}
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <p style={{ fontSize: 14, fontWeight: 600 }}>{idx + 1}. {it.title}</p>
+                  <p style={{ fontSize: 12, color: 'var(--text-secondary)' }}>Lot #{it.lot_number || '—'}</p>
+                  {it.description && <p style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 2 }}>{it.description.slice(0, 80)}</p>}
+                </div>
+
+                {/* Price */}
+                <div style={{ textAlign: 'right', flexShrink: 0 }}>
+                  <p style={{ fontSize: 14, fontWeight: 700 }}>{fmt(it.hammer_price)}</p>
+                  <p style={{ fontSize: 10, color: 'var(--text-muted)' }}>+{fmt(it.premium_amount)} +{fmt(it.tax_amount)}</p>
+                  <p style={{ fontSize: 12, fontWeight: 600, color: 'var(--accent)' }}>{fmt(it.total_cost)}</p>
+                </div>
+              </div>
+
+              {/* Photo count indicator */}
+              {photos.length > 0 && <div style={{ display: 'flex', gap: 4, marginTop: 6, marginLeft: 32 }}>
+                {photos.slice(0, 4).map((p, pi) => <div key={p.id || pi} style={{ width: 28, height: 28, borderRadius: 4, overflow: 'hidden', border: '1px solid var(--border-light)' }}>{p.url ? <img src={p.url} alt="" style={{ width: '100%', height: '100%', objectFit: 'cover' }} /> : null}</div>)}
+                {photos.length > 4 && <div style={{ width: 28, height: 28, borderRadius: 4, background: 'var(--bg-surface)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 10, color: 'var(--text-muted)' }}>+{photos.length - 4}</div>}
+                <button style={{ ...S.chip, fontSize: 10, padding: '3px 8px' }} onClick={() => setInvPhotoItemId(isUploading ? null : it.id)}>{ isUploading ? '✕ Close' : '+ Add'}</button>
+              </div>}
+
+              {/* No photo — quick add button */}
+              {photos.length === 0 && !isUploading && <button style={{ ...S.chip, fontSize: 11, marginTop: 6, marginLeft: 32, background: 'var(--accent-light)', color: 'var(--accent)' }} onClick={() => { setInvPhotoItemId(it.id); setInvPhotoLot(it.lot_number || ''); }}>📷 Add Photo & Lot#</button>}
+
+              {/* ── Expanded upload panel for this item ── */}
+              {isUploading && <div style={{ marginTop: 8, marginLeft: 32, padding: 12, background: 'var(--bg-surface)', borderRadius: 10, border: '1px solid var(--border)' }}>
+                <p style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-secondary)', marginBottom: 8 }}>Upload Photo for: {it.title}</p>
+                {/* Lot number input */}
+                <div style={{ marginBottom: 10 }}>
+                  <label style={{ display: 'block', fontSize: 11, fontWeight: 500, color: 'var(--text-muted)', marginBottom: 3 }}>Lot Number</label>
+                  <input style={{ ...S.input, padding: '8px 10px', fontSize: 14 }} placeholder="Enter lot number" value={invPhotoLot} onChange={e => setInvPhotoLot(e.target.value)} />
+                  {invPhotoLot !== (it.lot_number || '') && invPhotoLot && <button style={{ ...S.chip, marginTop: 4, fontSize: 11, background: 'var(--green-light)', color: 'var(--green)', fontWeight: 600 }} onClick={async () => { await handleUpdateLotNumber(it.id, invPhotoLot); setInvItemLots(prev => ({ ...prev, [it.id]: invPhotoLot })); notify('ok', 'Lot # saved'); }}>💾 Save Lot#</button>}
+                </div>
+                {/* Photo upload */}
+                <label role="button" style={{ ...S.btnP, display: 'block', textAlign: 'center', fontSize: 13, padding: '10px 16px', cursor: 'pointer' }}>
+                  <input type="file" accept="image/*" multiple onChange={e => handleInvItemPhoto(it.id, e)} style={{ display: 'none' }} />
+                  📷 Choose Photo(s)
+                </label>
+                <button style={{ ...S.chip, width: '100%', marginTop: 6, textAlign: 'center', justifyContent: 'center', display: 'flex' }} onClick={() => { setInvPhotoItemId(null); setInvPhotoLot(''); }}>Cancel</button>
+              </div>}
+
+              {/* Single-item print */}
+              <div style={{ display: 'flex', gap: 6, marginTop: 6, marginLeft: 32 }}>
+                <button style={{ ...S.chip, fontSize: 10, padding: '3px 8px' }} onClick={() => printInvoiceItems(modal.data, [it])}>🖨 Print</button>
+              </div>
+            </div>;
+          })}
+        </>)}
+
         {invDetailTab === 'original' && (!viewInvUrl ? <div style={{ textAlign: 'center', padding: 30 }}><div style={S.spinner} /></div> : modal.data.file_type?.includes('pdf') ? <iframe src={viewInvUrl} style={{ width: '100%', height: '55vh', borderRadius: 8, border: '1px solid var(--border)' }} /> : <img src={viewInvUrl} alt="" style={{ width: '100%', borderRadius: 8 }} />)}
         <div style={{ display: 'flex', gap: 8, marginTop: 12 }}><button style={{ ...S.btnO, flex: 1 }} onClick={() => { handleInvStatus(modal.data, modal.data.payment_status === 'Paid' ? 'Due' : 'Paid'); closeModal(); }}>{modal.data.payment_status === 'Paid' ? '⏳ Due' : '✅ Paid'}</button><button style={{ ...S.btnO, flex: 1, color: 'var(--red)' }} onClick={() => { db.deleteItemsByInvoice(modal.data.id).then(() => db.deleteInvoice(modal.data.id)).then(load); closeModal(); }}>🗑 Delete</button></div>
       </OL>}
