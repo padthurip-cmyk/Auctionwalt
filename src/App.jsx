@@ -70,10 +70,15 @@ export default function App() {
   const [invPhotoLot, setInvPhotoLot] = useState('');
   const [invStatusFilter, setInvStatusFilter] = useState('All');
   const [invSearch, setInvSearch] = useState('');
+  const [invSort, setInvSort] = useState('newest');
+  const [invVendor, setInvVendor] = useState('All');
+  const [stockSort, setStockSort] = useState('newest');
+  const [photoPreview, setPhotoPreview] = useState(null);
+  const [sharePrice, setSharePrice] = useState('');
   const [uploadBusy, setUploadBusy] = useState(false);
 
   const notify = useCallback((t, m) => { setToast({ t, m }); setTimeout(() => setToast(null), t === 'err' ? 8000 : 4000); }, []);
-  const closeModal = () => { setModal(null); setReceiptHtml(''); setBillHtml(''); setViewInvUrl(null); setInvDetailItems([]); setInvDetailTab('items'); setLcEvents([]); setEmailTo(''); setBillItems([]); setBillSearch(''); setItemNotes([]); setNoteForm({ category: 'product_defect', note: '' }); setSf({ amount: '', platform: '', buyer: '', buyerEmail: '', buyerPhone: '', billStatus: 'paid', includeHst: true, listingUrl: '' }); setExtractBusy(false); setExtractData(null); setInvItemLots({}); setInvPrintSelections({}); setInvPhotoItemId(null); setInvPhotoLot(''); };
+  const closeModal = () => { setModal(null); setReceiptHtml(''); setBillHtml(''); setViewInvUrl(null); setInvDetailItems([]); setInvDetailTab('items'); setLcEvents([]); setEmailTo(''); setBillItems([]); setBillSearch(''); setItemNotes([]); setNoteForm({ category: 'product_defect', note: '' }); setSf({ amount: '', platform: '', buyer: '', buyerEmail: '', buyerPhone: '', billStatus: 'paid', includeHst: true, listingUrl: '' }); setExtractBusy(false); setExtractData(null); setInvItemLots({}); setInvPrintSelections({}); setInvPhotoItemId(null); setInvPhotoLot(''); setPhotoPreview(null); setSharePrice(''); };
 
   useEffect(() => {
     const { data: { subscription } } = db.onAuthChange((_, s) => { if (s?.user) { setUser(s.user); setAuth('app'); } else { setUser(null); setAuth('login'); } });
@@ -126,26 +131,13 @@ export default function App() {
         notify('err', 'Could not extract items from this invoice. Try a clearer image or PDF.');
         return;
       }
-      // ── Duplicate check: match by invoice_number + auction_house, or by grand_total + date + auction_house ──
+      // ── Duplicate check: query DATABASE directly ──
       const ri = result.invoice;
-      const dup = invoices.find(existing => {
-        // Match 1: Same invoice number + same auction house
-        if (ri.invoice_number && existing.invoice_number && ri.auction_house && existing.auction_house) {
-          if (ri.invoice_number.toString().trim().toLowerCase() === existing.invoice_number.toString().trim().toLowerCase() &&
-              ri.auction_house.trim().toLowerCase() === existing.auction_house.trim().toLowerCase()) return true;
-        }
-        // Match 2: Same auction house + same date + same grand total (fallback if invoice # is missing)
-        if (ri.auction_house && existing.auction_house && ri.date && existing.date &&
-            ri.auction_house.trim().toLowerCase() === existing.auction_house.trim().toLowerCase() &&
-            ri.date === existing.date &&
-            ri.grand_total && existing.grand_total &&
-            Math.abs(parseFloat(ri.grand_total) - parseFloat(existing.grand_total)) < 0.01) return true;
-        return false;
-      });
+      const dup = await db.findDuplicateInvoice(ri.invoice_number, ri.auction_house, ri.grand_total, ri.date, file.name);
       if (dup) {
         setUploadBusy(false);
         if (fileRef.current) fileRef.current.value = '';
-        notify('err', `Duplicate invoice! "${dup.auction_house} #${dup.invoice_number}" (${fmtDate(dup.date)}) already exists.`);
+        notify('err', `⚠️ Duplicate! "${dup.auction_house || 'Invoice'} #${dup.invoice_number || ''}" (${fmtDate(dup.date)}, ${fmt(dup.grand_total)}) already exists.`);
         return;
       }
       const tempId = uid();
@@ -163,7 +155,7 @@ export default function App() {
       notify('err', `Upload failed: ${err.message}`);
     }
     if (fileRef.current) fileRef.current.value = '';
-  }, [notify, load, invoices]);
+  }, [notify, load]);
 
   const openInvoice = useCallback(async (inv) => { setModal({ type: 'invoiceView', data: inv }); setInvDetailTab('items'); setViewInvUrl(null); setInvPrintSelections({}); const detailItems = await db.getItemsByInvoice(inv.id); setInvDetailItems(detailItems); if (inv.file_path) setViewInvUrl(await db.getInvoiceFileUrl(inv.file_path)); const lotMap = {}; detailItems.forEach(it => { lotMap[it.id] = it.lot_number || ''; }); setInvItemLots(lotMap); for (const it of detailItems) { loadPhotos(it.id); } }, [loadPhotos]);
   const handleInvStatus = useCallback(async (inv, st) => { await db.updateInvoice(inv.id, { payment_status: st }); await load(); notify('ok', `→ ${st}`); }, [load, notify]);
@@ -183,6 +175,32 @@ export default function App() {
     const html = `<!DOCTYPE html><html><head><meta charset="utf-8"/><title>Print</title><style>@page{size:A4 portrait;margin:0}*{margin:0;padding:0;box-sizing:border-box}body{font-family:-apple-system,'Segoe UI',Arial,sans-serif;background:#fff;color:#1a1a1a;-webkit-print-color-adjust:exact;print-color-adjust:exact}.page{width:210mm;min-height:297mm;padding:15mm 20mm;display:flex;flex-direction:column}.pb{page-break-before:always}.ph{text-align:center;margin-bottom:8mm}.ph h1{font-size:18pt;font-weight:700;margin:3mm 0 1mm}.ph .sub{font-size:10pt;color:#666}.hl{height:1.5px;background:linear-gradient(90deg,transparent,#333 15%,#333 85%,transparent);margin:3mm 0}.items{flex:1;display:flex;flex-direction:column;gap:6mm}.ic{border:1.5px solid #ddd;border-radius:3mm;padding:4mm;display:flex;align-items:center;gap:5mm;min-height:70mm}.ip{width:60mm;height:60mm;flex-shrink:0;border-radius:2mm;overflow:hidden;background:#f5f5f5;display:flex;align-items:center;justify-content:center}.ip img{width:100%;height:100%;object-fit:cover}.np{color:#aaa;font-size:11pt}.ii{flex:1}.ii h2{font-size:14pt;font-weight:700;margin-bottom:2mm;line-height:1.3}.ii .lot{font-size:13pt;color:#444;font-weight:600;padding:2mm 4mm;background:#f0f0f0;border-radius:2mm;display:inline-block;margin-top:2mm}.pf{text-align:center;margin-top:5mm}.pf .pn{font-size:9pt;color:#999}</style></head><body>${pHTML}</body></html>`;
     const w = window.open('', '_blank', 'width=800,height=1000'); w.document.write(html); w.document.close(); setTimeout(() => { w.focus(); w.print(); }, 600);
   }, [itemPhotos]);
+
+  // ── Share with Customer — generates clean page with only name, photo, price ──
+  const openCustomerShare = useCallback(async (item) => {
+    setSharePrice(item.listing_price ? String(item.listing_price) : '');
+    await loadPhotos(item.id);
+    setModal({ type: 'customerShare', data: item });
+  }, [loadPhotos]);
+
+  const generateCustomerView = useCallback((item, price) => {
+    const photos = itemPhotos[item.id] || [];
+    const photoUrls = photos.filter(p => p.url).map(p => p.url);
+    const photosHtml = photoUrls.length > 0
+      ? photoUrls.map(u => `<img src="${u}" style="width:100%;max-height:400px;object-fit:cover;border-radius:12px;margin-bottom:12px;" />`).join('')
+      : '<div style="width:100%;height:200px;background:#f0f0f0;border-radius:12px;display:flex;align-items:center;justify-content:center;color:#999;font-size:16px;margin-bottom:12px;">No Photo</div>';
+    const html = `<!DOCTYPE html><html><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>${item.title}</title>
+<style>*{margin:0;padding:0;box-sizing:border-box}body{font-family:-apple-system,'Segoe UI',Arial,sans-serif;background:#f8f8f8;color:#1a1a1a;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:20px}
+.card{background:#fff;border-radius:20px;max-width:420px;width:100%;overflow:hidden;box-shadow:0 8px 30px rgba(0,0,0,.1)}.photos{padding:16px 16px 0}
+h1{font-size:20px;font-weight:700;padding:16px 20px 4px;line-height:1.3}.price{font-size:28px;font-weight:800;color:#FF6B00;padding:4px 20px 20px}
+.footer{padding:12px 20px;background:#f8f8f8;text-align:center;font-size:11px;color:#999}</style></head>
+<body><div class="card"><div class="photos">${photosHtml}</div><h1>${item.title}</h1><p class="price">$${parseFloat(price || 0).toFixed(2)}</p><div class="footer">Auction Vault</div></div></body></html>`;
+    return html;
+  }, [itemPhotos]);
+
+  const buildShareText = useCallback((item, price) => {
+    return `${item.title}\nPrice: $${parseFloat(price || 0).toFixed(2)}`;
+  }, []);
 
   const setItemPurpose = useCallback(async (item, p) => { await db.updateItem(item.id, { purpose: p }); await db.addLifecycleEvent({ item_id: item.id, event: p === 'personal' ? 'Personal' : 'For Sale' }); await load(); notify('ok', p === 'personal' ? 'Personal' : 'For sale'); }, [load, notify]);
   const setListingStatus = useCallback(async (item, st, platform, price) => { const u = { listing_status: st }; if (platform) u.listing_platform = platform; if (price) u.listing_price = price; if (st === 'live_listed') u.listed_at = new Date().toISOString(); await db.updateItem(item.id, u); await db.addLifecycleEvent({ item_id: item.id, event: st === 'live_listed' ? 'Listed Live' : st === 'pending_list' ? 'Pending List' : 'Unlisted', detail: platform || '' }); await load(); notify('ok', st === 'live_listed' ? 'Listed' : st === 'pending_list' ? 'Pending' : 'Unlisted'); }, [load, notify]);
@@ -289,7 +307,7 @@ export default function App() {
           </>}
         </>}
 
-        {/* INVOICES — ALL invoices with search + filter */}
+        {/* INVOICES — ALL invoices with vendor filter + sort + search */}
         {tab==='invoices'&&<>
           <div style={S.hdr}>
             <div style={{display:'flex',justifyContent:'space-between',alignItems:'center'}}>
@@ -297,17 +315,37 @@ export default function App() {
               <label role="button" style={{...S.btn1,padding:'10px 16px',fontSize:13,opacity:uploadBusy?.5:1}}><input ref={fileRef} type="file" accept=".pdf,.png,.jpg,.jpeg,.webp" onChange={handleUpload} style={{display:'none'}}/>{uploadBusy?'⏳ Analyzing...':'📄 Upload'}</label>
             </div>
           </div>
-          {/* Status filter pills */}
+          {/* Status pills */}
           <div style={S.pills}>{['All','Paid','Due'].map(f=><button key={f} style={{...S.pill,...(invStatusFilter===f?S.pillOn:{})}} onClick={()=>setInvStatusFilter(f)}>{f}{f==='Due'?` (${invoices.filter(i=>i.payment_status!=='Paid').length})`:f==='Paid'?` (${invoices.filter(i=>i.payment_status==='Paid').length})`:` (${invoices.length})`}</button>)}</div>
+          {/* Vendor filter + Sort row */}
+          <div style={{display:'flex',gap:8,marginBottom:10}}>
+            <select style={{...S.inp,flex:1,padding:'8px 10px',fontSize:13,appearance:'auto'}} value={invVendor} onChange={e=>setInvVendor(e.target.value)}>
+              <option value="All">All Vendors</option>
+              {[...new Set(invoices.map(i=>i.auction_house).filter(Boolean))].sort().map(v=><option key={v} value={v}>{v}</option>)}
+            </select>
+            <select style={{...S.inp,width:130,padding:'8px 10px',fontSize:13,appearance:'auto'}} value={invSort} onChange={e=>setInvSort(e.target.value)}>
+              <option value="newest">Newest First</option>
+              <option value="oldest">Oldest First</option>
+              <option value="highest">Highest $</option>
+              <option value="lowest">Lowest $</option>
+              <option value="name">A → Z</option>
+            </select>
+          </div>
           {/* Search */}
           <input style={{...S.inp,marginBottom:12}} placeholder="Search auction house, invoice #..." value={invSearch} onChange={e=>setInvSearch(e.target.value)}/>
           {/* Invoice list */}
           {(()=>{
-            let list = invoices;
+            let list = [...invoices];
             if(invStatusFilter==='Paid') list=list.filter(i=>i.payment_status==='Paid');
             if(invStatusFilter==='Due') list=list.filter(i=>i.payment_status!=='Paid');
+            if(invVendor!=='All') list=list.filter(i=>i.auction_house===invVendor);
             if(invSearch){const q=invSearch.toLowerCase(); list=list.filter(i=>[i.auction_house,i.invoice_number,i.event_description].some(f=>f?.toLowerCase?.().includes(q)));}
-            if(list.length===0) return <Empty text={invSearch?'No matching invoices':'No invoices yet. Upload one!'}/>;
+            if(invSort==='newest') list.sort((a,b)=>new Date(b.date||b.created_at)-new Date(a.date||a.created_at));
+            if(invSort==='oldest') list.sort((a,b)=>new Date(a.date||a.created_at)-new Date(b.date||b.created_at));
+            if(invSort==='highest') list.sort((a,b)=>parseFloat(b.grand_total||0)-parseFloat(a.grand_total||0));
+            if(invSort==='lowest') list.sort((a,b)=>parseFloat(a.grand_total||0)-parseFloat(b.grand_total||0));
+            if(invSort==='name') list.sort((a,b)=>(a.auction_house||'').localeCompare(b.auction_house||''));
+            if(list.length===0) return <Empty text={invSearch||invVendor!=='All'?'No matching invoices':'No invoices yet. Upload one!'}/>;
             return list.map((inv,i)=><div key={inv.id} className="fade-up" style={{...S.card,marginBottom:8,animationDelay:`${i*25}ms`,cursor:'pointer'}} onClick={()=>openInvoice(inv)}>
               <div style={{display:'flex',gap:12,padding:'14px 16px',alignItems:'center'}}>
                 <div style={{width:44,height:44,borderRadius:12,background:inv.payment_status==='Paid'?'var(--green-light)':'var(--red-light)',display:'flex',alignItems:'center',justifyContent:'center',flexShrink:0,fontSize:18}}>{inv.payment_status==='Paid'?'✅':'⏳'}</div>
@@ -328,32 +366,62 @@ export default function App() {
         {tab==='inventory'&&<>
           <div style={S.hdr}><h1 style={{fontSize:24,fontWeight:800}}>Inventory</h1><p style={{fontSize:13,color:'var(--text-muted)'}}>{items.length} items · {fmt(invValue)}</p></div>
           <div style={S.pills}>{INV_FILTERS.map(f=><button key={f} style={{...S.pill,...(invFilter===f?S.pillOn:{})}} onClick={()=>setInvFilter(f)}>{f}</button>)}</div>
-          <input style={{...S.inp,marginBottom:12}} placeholder="Search items..." value={search} onChange={e=>setSearch(e.target.value)}/>
-          {filteredInv().length===0?<Empty text="No items"/>:filteredInv().map((item,i)=>{
-            const ph=itemPhotos[item.id]||[]; const nc=allNotes.filter(n=>n.item_id===item.id&&!n.is_resolved).length;
-            return <div key={item.id} className="fade-up" style={{...S.card,marginBottom:8,animationDelay:`${i*20}ms`,...(nc>0?{borderLeft:'3px solid #F59E0B'}:{})}}>
-              <div style={{display:'flex',gap:10,padding:'12px 14px',alignItems:'center'}}>
-                <div style={S.thumb} onClick={()=>{setModal({type:'photos',data:item});loadPhotos(item.id);}}>{ph[0]?.url?<img src={ph[0].url} alt="" style={S.thumbImg}/>:<span style={{fontSize:18,color:'var(--text-hint)'}}>📷</span>}</div>
-                <div style={{flex:1,minWidth:0}} onClick={()=>setModal({type:'itemActions',data:item})}>
-                  <div style={{display:'flex',gap:4,marginBottom:2,flexWrap:'wrap'}}>
-                    {item.purpose==='personal'&&<Tag text="Personal"/>}
-                    {item.listing_status==='pending_list'&&<Tag text="Pending" color="var(--accent)" bg="var(--accent-light)"/>}
-                    {item.listing_status==='live_listed'&&<Tag text="Live" color="var(--green)" bg="var(--green-light)"/>}
+          {/* Sort + Search row */}
+          <div style={{display:'flex',gap:8,marginBottom:10}}>
+            <input style={{...S.inp,flex:1}} placeholder="Search items..." value={search} onChange={e=>setSearch(e.target.value)}/>
+            <select style={{...S.inp,width:130,padding:'8px 10px',fontSize:13,appearance:'auto'}} value={stockSort} onChange={e=>setStockSort(e.target.value)}>
+              <option value="newest">Newest</option>
+              <option value="oldest">Oldest</option>
+              <option value="highest">Highest $</option>
+              <option value="lowest">Lowest $</option>
+              <option value="name">A → Z</option>
+              <option value="vendor">Vendor</option>
+            </select>
+          </div>
+          {(()=>{
+            let list = [...filteredInv()];
+            if(stockSort==='newest') list.sort((a,b)=>new Date(b.created_at)-new Date(a.created_at));
+            if(stockSort==='oldest') list.sort((a,b)=>new Date(a.created_at)-new Date(b.created_at));
+            if(stockSort==='highest') list.sort((a,b)=>parseFloat(b.total_cost||0)-parseFloat(a.total_cost||0));
+            if(stockSort==='lowest') list.sort((a,b)=>parseFloat(a.total_cost||0)-parseFloat(b.total_cost||0));
+            if(stockSort==='name') list.sort((a,b)=>(a.title||'').localeCompare(b.title||''));
+            if(stockSort==='vendor') list.sort((a,b)=>(a.auction_house||'').localeCompare(b.auction_house||''));
+            if(list.length===0) return <Empty text="No items"/>;
+            return list.map((item,i)=>{
+              const ph=itemPhotos[item.id]||[]; const hasPh=ph.length>0&&ph[0].url; const nc=allNotes.filter(n=>n.item_id===item.id&&!n.is_resolved).length;
+              return <div key={item.id} className="fade-up" style={{...S.card,marginBottom:10,animationDelay:`${i*20}ms`,...(nc>0?{borderLeft:'3px solid #F59E0B'}:{})}}>
+                {/* Top row: thumbnail + info + price */}
+                <div style={{display:'flex',gap:10,padding:'12px 14px',alignItems:'center'}}>
+                  <div style={S.thumb} onClick={()=>{setModal({type:'photos',data:item});loadPhotos(item.id);}}>{hasPh?<img src={ph[0].url} alt="" style={S.thumbImg}/>:<span style={{fontSize:18,color:'var(--text-hint)'}}>📷</span>}</div>
+                  <div style={{flex:1,minWidth:0}}>
+                    <p style={{fontSize:14,fontWeight:600,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{item.title}</p>
+                    <p style={{fontSize:12,color:'var(--text-muted)'}}>{item.auction_house} · Lot #{item.lot_number}</p>
                     {nc>0&&<Tag text={`${nc} issue${nc>1?'s':''}`} color="#92400E" bg="#FEF3C7"/>}
                   </div>
-                  <p style={{fontSize:14,fontWeight:600,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{item.title}</p>
-                  <p style={{fontSize:12,color:'var(--text-muted)'}}>{item.auction_house} · Lot #{item.lot_number}</p>
+                  <div style={{textAlign:'right',flexShrink:0}}><p style={{fontSize:15,fontWeight:700,color:'var(--accent)'}}>{fmt(item.total_cost)}</p>{item.listing_price&&<p style={{fontSize:11,color:'var(--green)'}}>Ask {fmt(item.listing_price)}</p>}</div>
                 </div>
-                <div style={{textAlign:'right',flexShrink:0}}><p style={{fontSize:15,fontWeight:700,color:'var(--accent)'}}>{fmt(item.total_cost)}</p>{item.listing_price&&<p style={{fontSize:11,color:'var(--green)'}}>Ask {fmt(item.listing_price)}</p>}</div>
-              </div>
-              <div style={S.acts}>
-                <button style={S.chip} onClick={()=>{setModal({type:'photos',data:item});loadPhotos(item.id);}}>📷</button>
-                <button style={S.chip} onClick={()=>{setModal({type:'notes',data:item,isSold:false});loadItemNotes(item.id,null);}}>💬{nc>0?` ${nc}`:''}</button>
-                <button style={S.chip} onClick={()=>setModal({type:'itemActions',data:item})}>⚙️</button>
-                {item.purpose!=='personal'&&<button style={{...S.chip,background:'var(--accent-light)',color:'var(--accent)',fontWeight:700}} onClick={()=>setModal({type:'sell',data:item})}>💰 Sell</button>}
-              </div>
-            </div>;
-          })}
+                {/* Toggles row: For Sale / Personal + Listed / Not Listed */}
+                <div style={{display:'flex',gap:6,padding:'6px 14px',flexWrap:'wrap',alignItems:'center'}}>
+                  <div style={{display:'flex',borderRadius:8,overflow:'hidden',border:'1px solid var(--border)',fontSize:12}}>
+                    <button style={{padding:'5px 10px',border:'none',fontFamily:'var(--font)',cursor:'pointer',fontWeight:600,background:(item.purpose||'for_sale')!=='personal'?'var(--accent)':'var(--bg-surface)',color:(item.purpose||'for_sale')!=='personal'?'#fff':'var(--text-muted)'}} onClick={()=>{if(item.purpose==='personal')setItemPurpose(item,'for_sale');}}>🏷 For Sale</button>
+                    <button style={{padding:'5px 10px',border:'none',fontFamily:'var(--font)',cursor:'pointer',fontWeight:600,background:item.purpose==='personal'?'var(--blue)':'var(--bg-surface)',color:item.purpose==='personal'?'#fff':'var(--text-muted)'}} onClick={()=>{if(item.purpose!=='personal')setItemPurpose(item,'personal');}}>🏠 Personal</button>
+                  </div>
+                  {item.purpose!=='personal'&&<div style={{display:'flex',borderRadius:8,overflow:'hidden',border:'1px solid var(--border)',fontSize:12}}>
+                    <button style={{padding:'5px 10px',border:'none',fontFamily:'var(--font)',cursor:'pointer',fontWeight:600,background:item.listing_status==='live_listed'?'var(--green)':'var(--bg-surface)',color:item.listing_status==='live_listed'?'#fff':'var(--text-muted)'}} onClick={()=>{if(item.listing_status!=='live_listed')setListingStatus(item,'live_listed');else setListingStatus(item,'none');}}>✅ Listed</button>
+                    <button style={{padding:'5px 10px',border:'none',fontFamily:'var(--font)',cursor:'pointer',fontWeight:600,background:(!item.listing_status||item.listing_status==='none')?'var(--red)':'var(--bg-surface)',color:(!item.listing_status||item.listing_status==='none')?'#fff':'var(--text-muted)'}} onClick={()=>{if(item.listing_status&&item.listing_status!=='none')setListingStatus(item,'none');}}>✗ Not Listed</button>
+                  </div>}
+                </div>
+                {/* Action buttons row */}
+                <div style={S.acts}>
+                  {hasPh?<button style={{...S.chip,background:'var(--accent-light)',color:'var(--accent)',fontWeight:700}} onClick={()=>{setModal({type:'photos',data:item});loadPhotos(item.id);}}>✏️ Edit Photos ({ph.length})</button>:<button style={S.chip} onClick={()=>{setModal({type:'photos',data:item});loadPhotos(item.id);}}>📷 Add Photos</button>}
+                  <button style={{...S.chip,background:'var(--green-light)',color:'var(--green)',fontWeight:700}} onClick={()=>openCustomerShare(item)}>📤 Share</button>
+                  <button style={S.chip} onClick={()=>{setModal({type:'notes',data:item,isSold:false});loadItemNotes(item.id,null);}}>💬{nc>0?` ${nc}`:''}</button>
+                  <button style={S.chip} onClick={()=>setModal({type:'itemActions',data:item})}>⚙️ More</button>
+                  {item.purpose!=='personal'&&<button style={{...S.chip,background:'var(--accent-light)',color:'var(--accent)',fontWeight:700}} onClick={()=>setModal({type:'sell',data:item})}>💰 Sell</button>}
+                </div>
+              </div>;
+            });
+          })()}
         </>}
 
         {/* SALES */}
@@ -463,7 +531,54 @@ export default function App() {
       </OL>}
 
       {/* PHOTOS */}
-      {modal?.type==='photos'&&<OL close={closeModal}><h3 style={S.mT}>Photos</h3><label role="button" style={{...S.btn1,display:'block',textAlign:'center',marginBottom:14,cursor:'pointer'}}><input type="file" accept="image/*" multiple onChange={e=>handlePhoto(modal.data.id,e)} style={{display:'none'}}/>📷 Upload</label>{(itemPhotos[modal.data.id]||[]).length>0?<div style={{display:'grid',gridTemplateColumns:'repeat(3,1fr)',gap:8}}>{(itemPhotos[modal.data.id]).map((p,i)=><div key={p.id||i} style={{position:'relative',aspectRatio:'1',borderRadius:12,overflow:'hidden',background:'var(--bg-surface)'}}>{p.url?<img src={p.url} alt="" style={{width:'100%',height:'100%',objectFit:'cover'}}/>:<div style={{width:'100%',height:'100%',display:'flex',alignItems:'center',justifyContent:'center',color:'var(--text-hint)'}}>...</div>}<button onClick={()=>handleDeletePhoto(modal.data.id,p)} style={{position:'absolute',top:5,right:5,width:26,height:26,borderRadius:13,background:'rgba(220,38,38,.9)',color:'#fff',border:'none',fontSize:14,display:'flex',alignItems:'center',justifyContent:'center',cursor:'pointer',boxShadow:'0 2px 6px rgba(0,0,0,.3)'}}>✕</button></div>)}</div>:<p style={{textAlign:'center',color:'var(--text-muted)',padding:24}}>No photos</p>}</OL>}
+      {modal?.type==='photos'&&<OL close={closeModal}><h3 style={S.mT}>Photos — {modal.data.title}</h3>
+        <label role="button" style={{...S.btn1,display:'block',textAlign:'center',marginBottom:14,cursor:'pointer'}}><input type="file" accept="image/*" multiple onChange={e=>handlePhoto(modal.data.id,e)} style={{display:'none'}}/>📷 Upload Photos</label>
+        {(itemPhotos[modal.data.id]||[]).length>0?<div style={{display:'grid',gridTemplateColumns:'repeat(3,1fr)',gap:8}}>
+          {(itemPhotos[modal.data.id]).map((p,i)=><div key={p.id||i} style={{position:'relative',aspectRatio:'1',borderRadius:12,overflow:'hidden',background:'var(--bg-surface)'}}>
+            {p.url?<img src={p.url} alt="" style={{width:'100%',height:'100%',objectFit:'cover',cursor:'pointer'}} onClick={()=>setPhotoPreview(p)}/>:<div style={{width:'100%',height:'100%',display:'flex',alignItems:'center',justifyContent:'center',color:'var(--text-hint)'}}>...</div>}
+            <button onClick={()=>handleDeletePhoto(modal.data.id,p)} style={{position:'absolute',top:5,right:5,width:26,height:26,borderRadius:13,background:'rgba(220,38,38,.9)',color:'#fff',border:'none',fontSize:14,display:'flex',alignItems:'center',justifyContent:'center',cursor:'pointer',boxShadow:'0 2px 6px rgba(0,0,0,.3)'}}>✕</button>
+          </div>)}
+        </div>:<p style={{textAlign:'center',color:'var(--text-muted)',padding:24}}>No photos yet. Tap Upload to add.</p>}
+        <p style={{fontSize:11,color:'var(--text-muted)',textAlign:'center',marginTop:10}}>Tap photo to preview & download · Tap ✕ to delete</p>
+      </OL>}
+
+      {/* PHOTO PREVIEW — fullscreen with download */}
+      {photoPreview&&<div style={{position:'fixed',inset:0,background:'rgba(0,0,0,.85)',display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',zIndex:999,padding:20}} onClick={()=>setPhotoPreview(null)}>
+        <img src={photoPreview.url} alt="" style={{maxWidth:'90%',maxHeight:'70vh',borderRadius:12,objectFit:'contain',boxShadow:'0 4px 20px rgba(0,0,0,.5)'}} onClick={e=>e.stopPropagation()}/>
+        <div style={{display:'flex',gap:12,marginTop:16}} onClick={e=>e.stopPropagation()}>
+          <button style={{...S.btn1,padding:'12px 24px',fontSize:14}} onClick={()=>{const a=document.createElement('a');a.href=photoPreview.url;a.download=photoPreview.file_name||'photo.jpg';a.target='_blank';a.click();}}>⬇️ Download</button>
+          <button style={{...S.btn2,padding:'12px 24px',fontSize:14,color:'#fff',borderColor:'rgba(255,255,255,.3)'}} onClick={()=>setPhotoPreview(null)}>✕ Close</button>
+        </div>
+      </div>}
+
+      {/* CUSTOMER SHARE — ask price, then share clean view */}
+      {modal?.type==='customerShare'&&<OL close={closeModal}>
+        <h3 style={S.mT}>📤 Share with Customer</h3>
+        <p style={{fontSize:13,color:'var(--text-muted)',marginBottom:12}}>{modal.data.title}</p>
+
+        {/* Preview card */}
+        {(()=>{const photos=itemPhotos[modal.data.id]||[];const url=photos[0]?.url;return<div style={{background:'var(--bg-surface)',borderRadius:14,padding:12,marginBottom:14,textAlign:'center'}}>
+          {url?<img src={url} alt="" style={{width:'100%',maxHeight:180,objectFit:'cover',borderRadius:10,marginBottom:8}}/>:<div style={{width:'100%',height:100,background:'var(--border)',borderRadius:10,display:'flex',alignItems:'center',justifyContent:'center',color:'var(--text-muted)',marginBottom:8}}>No Photo</div>}
+          <p style={{fontSize:16,fontWeight:700}}>{modal.data.title}</p>
+          {sharePrice&&<p style={{fontSize:22,fontWeight:800,color:'var(--accent)',marginTop:4}}>${parseFloat(sharePrice).toFixed(2)}</p>}
+          <p style={{fontSize:10,color:'var(--text-hint)',marginTop:4}}>This is how the customer will see it</p>
+        </div>;})()}
+
+        {/* Price input */}
+        <Lbl t="Price to show customer *"/>
+        <input style={S.inp} type="number" step="0.01" placeholder="0.00" value={sharePrice} onChange={e=>setSharePrice(e.target.value)} autoFocus/>
+
+        {/* Share buttons */}
+        <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:8,marginTop:14}}>
+          <button style={{...S.btn1,fontSize:13,padding:'12px'}} disabled={!sharePrice} onClick={()=>{const html=generateCustomerView(modal.data,sharePrice);const w=window.open('','_blank','width=480,height=700');w.document.write(html);w.document.close();}}>👁 Preview</button>
+          <button style={{...S.btn2,fontSize:13,padding:'12px'}} disabled={!sharePrice} onClick={()=>{const text=buildShareText(modal.data,sharePrice);openWhatsApp('',text);notify('ok','Opening WhatsApp');}}>📱 WhatsApp</button>
+          <button style={{...S.btn2,fontSize:13,padding:'12px'}} disabled={!sharePrice} onClick={()=>{const text=buildShareText(modal.data,sharePrice);openSMS('',text);notify('ok','Opening SMS');}}>💬 SMS</button>
+          <button style={{...S.btn2,fontSize:13,padding:'12px'}} disabled={!sharePrice} onClick={()=>{const text=buildShareText(modal.data,sharePrice);navigator.clipboard?.writeText(text);notify('ok','Copied to clipboard');}}>📋 Copy Text</button>
+        </div>
+
+        {/* Email option */}
+        <button style={{...S.btn2,width:'100%',marginTop:8,fontSize:13}} disabled={!sharePrice} onClick={()=>{const subj=encodeURIComponent(modal.data.title);const body=encodeURIComponent(buildShareText(modal.data,sharePrice));window.open(`mailto:?subject=${subj}&body=${body}`,'_blank');notify('ok','Opening email');}}>📧 Email</button>
+      </OL>}
 
       {/* GO LIVE */}
       {modal?.type==='goLive'&&<OL close={closeModal}><h3 style={S.mT}>List Live — {modal.data.title}</h3><Lbl t="Listing URL"/><div style={{display:'flex',gap:6}}><input style={{...S.inp,flex:1}} type="url" placeholder="https://..." value={sf.listingUrl} onChange={e=>{setSf({...sf,listingUrl:e.target.value});setExtractData(null);}}/><button style={{...S.btn1,padding:'10px 14px',fontSize:13,opacity:(!sf.listingUrl||extractBusy)?.4:1}} disabled={!sf.listingUrl||extractBusy} onClick={async()=>{setExtractBusy(true);setExtractData(null);try{const data=await extractListing(sf.listingUrl);setExtractData(data);if(data.price&&!sf.amount)setSf(p=>({...p,amount:String(data.price)}));if(data.siteName&&!sf.platform){const s=data.siteName.toLowerCase();setSf(p=>({...p,platform:s.includes('facebook')?'Facebook Marketplace':s.includes('kijiji')?'Kijiji':s.includes('ebay')?'eBay':data.siteName}));}notify('ok','Extracted!');}catch(err){notify('err',err.message);}setExtractBusy(false);}}>{extractBusy?'...':'🔍'}</button></div>{extractData&&!extractData.error&&<div style={{background:'var(--bg-surface)',borderRadius:10,padding:12,marginTop:10}}>{extractData.image&&<img src={extractData.image} alt="" style={{width:'100%',height:120,objectFit:'cover',borderRadius:8,marginBottom:8}} onError={e=>{e.target.style.display='none';}}/>}{extractData.title&&<p style={{fontSize:14,fontWeight:600}}>{extractData.title}</p>}{extractData.price&&<p style={{fontSize:16,fontWeight:700,color:'var(--accent)'}}>${extractData.price.toFixed(2)}</p>}</div>}<Lbl t="Platform"/><input style={S.inp} placeholder="Facebook, Kijiji..." value={sf.platform} onChange={e=>setSf({...sf,platform:e.target.value})}/><Lbl t="Asking Price"/><input style={S.inp} type="number" step="0.01" placeholder="0.00" value={sf.amount} onChange={e=>setSf({...sf,amount:e.target.value})}/><button style={{...S.btn1,width:'100%',marginTop:16}} onClick={async()=>{const u={listing_status:'live_listed',listing_platform:sf.platform,listed_at:new Date().toISOString()};if(sf.amount)u.listing_price=parseFloat(sf.amount);if(sf.listingUrl)u.listing_url=sf.listingUrl;await db.updateItem(modal.data.id,u);await db.addLifecycleEvent({item_id:modal.data.id,event:'Listed Live',detail:`${sf.platform||''}${sf.amount?' · $'+sf.amount:''}`});await load();closeModal();notify('ok','Listed!');}}>🟢 Go Live</button></OL>}
