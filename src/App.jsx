@@ -10,7 +10,15 @@ const TABS = [
   { id: 'sales', icon: '💰', label: 'Sales' },
   { id: 'account', icon: '👤', label: 'Me' },
 ];
-const INV_FILTERS = ['All', 'For Sale', 'Personal', 'Pending', 'Listed'];
+const INV_FILTERS = ['All', 'For Sale', 'Listed', 'Booked', 'Personal', 'Damaged', 'Returns'];
+const ITEM_STATUSES = [
+  { id: 'for_sale', label: 'For Sale', icon: '🏷', color: '#FF6B00', bg: '#FFF4EC' },
+  { id: 'listed', label: 'Listed', icon: '📋', color: '#16A34A', bg: '#EAFBF0' },
+  { id: 'booked', label: 'Booked', icon: '🔒', color: '#7C3AED', bg: '#F5F3FF' },
+  { id: 'personal', label: 'Personal', icon: '🏠', color: '#2563EB', bg: '#EBF5FF' },
+  { id: 'damaged', label: 'Damaged', icon: '⚠️', color: '#DC2626', bg: '#FFF0EF' },
+  { id: 'returns', label: 'Returns', icon: '↩️', color: '#C2410C', bg: '#FFF7ED' },
+];
 const SALE_FILTERS = ['New Bill', 'Due', 'Closed'];
 const ISSUE_FILTERS = ['Open', 'Resolved', 'All'];
 const NOTE_CATEGORIES = [
@@ -184,25 +192,26 @@ export default function App() {
   }, [loadPhotos]);
 
   const generateCustomerView = useCallback((item, price) => {
-    const photos = itemPhotos[item.id] || [];
-    const photoUrls = photos.filter(p => p.url).map(p => p.url);
-    const photosHtml = photoUrls.length > 0
-      ? photoUrls.map(u => `<img src="${u}" style="width:100%;max-height:400px;object-fit:cover;border-radius:12px;margin-bottom:12px;" />`).join('')
-      : '<div style="width:100%;height:200px;background:#f0f0f0;border-radius:12px;display:flex;align-items:center;justify-content:center;color:#999;font-size:16px;margin-bottom:12px;">No Photo</div>';
-    const html = `<!DOCTYPE html><html><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>${item.title}</title>
-<style>*{margin:0;padding:0;box-sizing:border-box}body{font-family:-apple-system,'Segoe UI',Arial,sans-serif;background:#f8f8f8;color:#1a1a1a;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:20px}
-.card{background:#fff;border-radius:20px;max-width:420px;width:100%;overflow:hidden;box-shadow:0 8px 30px rgba(0,0,0,.1)}.photos{padding:16px 16px 0}
-h1{font-size:20px;font-weight:700;padding:16px 20px 4px;line-height:1.3}.price{font-size:28px;font-weight:800;color:#FF6B00;padding:4px 20px 20px}
-.footer{padding:12px 20px;background:#f8f8f8;text-align:center;font-size:11px;color:#999}</style></head>
-<body><div class="card"><div class="photos">${photosHtml}</div><h1>${item.title}</h1><p class="price">$${parseFloat(price || 0).toFixed(2)}</p><div class="footer">Auction Vault</div></div></body></html>`;
-    return html;
+    const photos = (itemPhotos[item.id] || []).filter(p => p.url);
+    const photosHtml = photos.length > 0
+      ? photos.map(p => `<div class="ph"><img src="${p.url}"/></div>`).join('')
+      : '<div class="noph">No Photos Available</div>';
+    return `<!DOCTYPE html><html><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>${item.title}</title>
+<style>*{margin:0;padding:0;box-sizing:border-box}body{font-family:-apple-system,'Segoe UI',Arial,sans-serif;background:#f5f5f5;color:#1a1a1a;min-height:100vh;padding:16px}
+.card{background:#fff;border-radius:20px;max-width:480px;margin:0 auto;overflow:hidden;box-shadow:0 8px 30px rgba(0,0,0,.08)}
+.gallery{display:flex;flex-direction:column;gap:8px;padding:16px}
+.ph{border-radius:12px;overflow:hidden}.ph img{width:100%;display:block;object-fit:cover;max-height:420px}
+.noph{height:160px;background:#f0f0f0;border-radius:12px;display:flex;align-items:center;justify-content:center;color:#999;margin:16px}
+.info{padding:16px 20px 20px}h1{font-size:22px;font-weight:700;line-height:1.3;margin-bottom:8px}
+.price{font-size:32px;font-weight:800;color:#FF6B00}.footer{padding:14px 20px;background:#fafafa;border-top:1px solid #eee;text-align:center;font-size:11px;color:#bbb}</style></head>
+<body><div class="card"><div class="gallery">${photosHtml}</div><div class="info"><h1>${item.title}</h1><p class="price">$${parseFloat(price||0).toFixed(2)}</p></div><div class="footer">Auction Vault</div></div></body></html>`;
   }, [itemPhotos]);
 
   const buildShareText = useCallback((item, price) => {
     return `${item.title}\nPrice: $${parseFloat(price || 0).toFixed(2)}`;
   }, []);
 
-  const setItemPurpose = useCallback(async (item, p) => { await db.updateItem(item.id, { purpose: p }); await db.addLifecycleEvent({ item_id: item.id, event: p === 'personal' ? 'Personal' : 'For Sale' }); await load(); notify('ok', p === 'personal' ? 'Personal' : 'For sale'); }, [load, notify]);
+  const setItemPurpose = useCallback(async (item, p) => { const st = ITEM_STATUSES.find(s=>s.id===p)||ITEM_STATUSES[0]; await db.updateItem(item.id, { purpose: p }); await db.addLifecycleEvent({ item_id: item.id, event: `Status: ${st.label}`, detail: `Changed to ${st.label}` }); await load(); notify('ok', `${st.icon} ${st.label}`); }, [load, notify]);
   const setListingStatus = useCallback(async (item, st, platform, price) => { const u = { listing_status: st }; if (platform) u.listing_platform = platform; if (price) u.listing_price = price; if (st === 'live_listed') u.listed_at = new Date().toISOString(); await db.updateItem(item.id, u); await db.addLifecycleEvent({ item_id: item.id, event: st === 'live_listed' ? 'Listed Live' : st === 'pending_list' ? 'Pending List' : 'Unlisted', detail: platform || '' }); await load(); notify('ok', st === 'live_listed' ? 'Listed' : st === 'pending_list' ? 'Pending' : 'Unlisted'); }, [load, notify]);
   const handlePhoto = useCallback(async (id, e) => {
     const files = Array.from(e.target.files || []); if (!files.length) return;
@@ -247,7 +256,7 @@ h1{font-size:20px;font-weight:700;padding:16px 20px 4px;line-height:1.3}.price{f
 
   const personalItems = items.filter(i => i.purpose === 'personal');
   const pendingItems = items.filter(i => i.listing_status === 'pending_list');
-  const listedItems = items.filter(i => i.listing_status === 'live_listed');
+  const listedItems = items.filter(i => i.purpose === 'listed' || i.listing_status === 'live_listed');
   const dueBills = sold.filter(i => i.bill_status === 'due');
   const closedBills = sold.filter(i => i.bill_status === 'paid');
   const openNotes = allNotes.filter(n => !n.is_resolved);
@@ -256,7 +265,11 @@ h1{font-size:20px;font-weight:700;padding:16px 20px 4px;line-height:1.3}.price{f
   const totalRev = sold.reduce((s, i) => s + parseFloat(i.sold_price || 0), 0);
   const totalProfit = sold.reduce((s, i) => s + parseFloat(i.profit || 0), 0);
   const invValue = items.reduce((s, i) => s + parseFloat(i.total_cost || 0), 0);
-  const filteredInv = () => { let arr = items; if (invFilter === 'For Sale') arr = items.filter(i => (i.purpose || 'for_sale') === 'for_sale' && (!i.listing_status || i.listing_status === 'none')); else if (invFilter === 'Personal') arr = personalItems; else if (invFilter === 'Pending') arr = pendingItems; else if (invFilter === 'Listed') arr = listedItems; if (!search) return arr; const t = search.toLowerCase(); return arr.filter(i => [i.title, i.description, i.auction_house, i.lot_number].some(f => f?.toLowerCase?.().includes(t))); };
+  const getItemStatus = (item) => item.purpose || 'for_sale';
+  const getStatusInfo = (id) => ITEM_STATUSES.find(s => s.id === id) || ITEM_STATUSES[0];
+  const filteredInv = () => { let arr = items; const f = invFilter; if (f === 'For Sale') arr = items.filter(i => (i.purpose || 'for_sale') === 'for_sale'); else if (f === 'Listed') arr = items.filter(i => i.purpose === 'listed' || i.listing_status === 'live_listed'); else if (f === 'Booked') arr = items.filter(i => i.purpose === 'booked'); else if (f === 'Personal') arr = personalItems; else if (f === 'Damaged') arr = items.filter(i => i.purpose === 'damaged'); else if (f === 'Returns') arr = items.filter(i => i.purpose === 'returns'); if (!search) return arr; const t = search.toLowerCase(); return arr.filter(i => [i.title, i.description, i.auction_house, i.lot_number].some(f => f?.toLowerCase?.().includes(t))); };
+  // Check if all items of an invoice have photos
+  const invoicePhotosComplete = (invId) => { const invItems = items.filter(i => i.invoice_id === invId); if (invItems.length === 0) return null; return invItems.every(i => (itemPhotos[i.id] || []).length > 0); };
   const noteItemName = (note) => { if (note.item_id) { const it = items.find(i => i.id === note.item_id); return it ? it.title : 'Unknown'; } if (note.sold_item_id) { const si = sold.find(i => i.id === note.sold_item_id); return si ? si.title : 'Sold item'; } return 'Unknown'; };
 
   // ═══ RENDER ═══
@@ -346,19 +359,20 @@ h1{font-size:20px;font-weight:700;padding:16px 20px 4px;line-height:1.3}.price{f
             if(invSort==='lowest') list.sort((a,b)=>parseFloat(a.grand_total||0)-parseFloat(b.grand_total||0));
             if(invSort==='name') list.sort((a,b)=>(a.auction_house||'').localeCompare(b.auction_house||''));
             if(list.length===0) return <Empty text={invSearch||invVendor!=='All'?'No matching invoices':'No invoices yet. Upload one!'}/>;
-            return list.map((inv,i)=><div key={inv.id} className="fade-up" style={{...S.card,marginBottom:8,animationDelay:`${i*25}ms`,cursor:'pointer'}} onClick={()=>openInvoice(inv)}>
+            return list.map((inv,i)=>{const pc=invoicePhotosComplete(inv.id);return <div key={inv.id} className="fade-up" style={{...S.card,marginBottom:8,animationDelay:`${i*25}ms`,cursor:'pointer',borderLeft:pc===true?'3px solid var(--green)':pc===false?'3px solid var(--red)':'none'}} onClick={()=>openInvoice(inv)}>
               <div style={{display:'flex',gap:12,padding:'14px 16px',alignItems:'center'}}>
-                <div style={{width:44,height:44,borderRadius:12,background:inv.payment_status==='Paid'?'var(--green-light)':'var(--red-light)',display:'flex',alignItems:'center',justifyContent:'center',flexShrink:0,fontSize:18}}>{inv.payment_status==='Paid'?'✅':'⏳'}</div>
+                <div style={{width:44,height:44,borderRadius:12,background:pc===true?'var(--green-light)':pc===false?'var(--red-light)':'var(--bg-surface)',display:'flex',alignItems:'center',justifyContent:'center',flexShrink:0,fontSize:18}}>{pc===true?'✅':pc===false?'📷':'📄'}</div>
                 <div style={{flex:1,minWidth:0}}>
                   <p style={{fontSize:15,fontWeight:600,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{inv.auction_house}</p>
                   <p style={{fontSize:12,color:'var(--text-muted)'}}>{fmtDate(inv.date)} · #{inv.invoice_number} · {inv.item_count} items</p>
+                  {pc===false&&<span style={{fontSize:10,color:'var(--red)',fontWeight:600}}>⚠ Photos missing</span>}
                 </div>
                 <div style={{textAlign:'right',flexShrink:0}}>
                   <p style={{fontSize:16,fontWeight:700,color:'var(--accent)'}}>{fmt(inv.grand_total)}</p>
                   <Tag text={inv.payment_status||'Due'} ok={inv.payment_status==='Paid'}/>
                 </div>
               </div>
-            </div>);
+            </div>;});
           })()}
         </>}
 
@@ -394,22 +408,16 @@ h1{font-size:20px;font-weight:700;padding:16px 20px 4px;line-height:1.3}.price{f
                 <div style={{display:'flex',gap:10,padding:'12px 14px',alignItems:'center'}}>
                   <div style={S.thumb} onClick={()=>{setModal({type:'photos',data:item});loadPhotos(item.id);}}>{hasPh?<img src={ph[0].url} alt="" style={S.thumbImg}/>:<span style={{fontSize:18,color:'var(--text-hint)'}}>📷</span>}</div>
                   <div style={{flex:1,minWidth:0}}>
+                    {(()=>{const st=getStatusInfo(getItemStatus(item));return<span style={{fontSize:10,fontWeight:700,padding:'2px 8px',borderRadius:6,background:st.bg,color:st.color,marginBottom:2,display:'inline-block'}}>{st.icon} {st.label}</span>;})()}
                     <p style={{fontSize:14,fontWeight:600,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{item.title}</p>
                     <p style={{fontSize:12,color:'var(--text-muted)'}}>{item.auction_house} · Lot #{item.lot_number}</p>
                     {nc>0&&<Tag text={`${nc} issue${nc>1?'s':''}`} color="#92400E" bg="#FEF3C7"/>}
                   </div>
                   <div style={{textAlign:'right',flexShrink:0}}><p style={{fontSize:15,fontWeight:700,color:'var(--accent)'}}>{fmt(item.total_cost)}</p>{item.listing_price&&<p style={{fontSize:11,color:'var(--green)'}}>Ask {fmt(item.listing_price)}</p>}</div>
                 </div>
-                {/* Toggles row: For Sale / Personal + Listed / Not Listed */}
-                <div style={{display:'flex',gap:6,padding:'6px 14px',flexWrap:'wrap',alignItems:'center'}}>
-                  <div style={{display:'flex',borderRadius:8,overflow:'hidden',border:'1px solid var(--border)',fontSize:12}}>
-                    <button style={{padding:'5px 10px',border:'none',fontFamily:'var(--font)',cursor:'pointer',fontWeight:600,background:(item.purpose||'for_sale')!=='personal'?'var(--accent)':'var(--bg-surface)',color:(item.purpose||'for_sale')!=='personal'?'#fff':'var(--text-muted)'}} onClick={()=>{if(item.purpose==='personal')setItemPurpose(item,'for_sale');}}>🏷 For Sale</button>
-                    <button style={{padding:'5px 10px',border:'none',fontFamily:'var(--font)',cursor:'pointer',fontWeight:600,background:item.purpose==='personal'?'var(--blue)':'var(--bg-surface)',color:item.purpose==='personal'?'#fff':'var(--text-muted)'}} onClick={()=>{if(item.purpose!=='personal')setItemPurpose(item,'personal');}}>🏠 Personal</button>
-                  </div>
-                  {item.purpose!=='personal'&&<div style={{display:'flex',borderRadius:8,overflow:'hidden',border:'1px solid var(--border)',fontSize:12}}>
-                    <button style={{padding:'5px 10px',border:'none',fontFamily:'var(--font)',cursor:'pointer',fontWeight:600,background:item.listing_status==='live_listed'?'var(--green)':'var(--bg-surface)',color:item.listing_status==='live_listed'?'#fff':'var(--text-muted)'}} onClick={()=>{if(item.listing_status!=='live_listed')setListingStatus(item,'live_listed');else setListingStatus(item,'none');}}>✅ Listed</button>
-                    <button style={{padding:'5px 10px',border:'none',fontFamily:'var(--font)',cursor:'pointer',fontWeight:600,background:(!item.listing_status||item.listing_status==='none')?'var(--red)':'var(--bg-surface)',color:(!item.listing_status||item.listing_status==='none')?'#fff':'var(--text-muted)'}} onClick={()=>{if(item.listing_status&&item.listing_status!=='none')setListingStatus(item,'none');}}>✗ Not Listed</button>
-                  </div>}
+                {/* Status chips row */}
+                <div style={{display:'flex',gap:4,padding:'6px 14px',flexWrap:'wrap'}}>
+                  {ITEM_STATUSES.map(st=>{const active=getItemStatus(item)===st.id;return<button key={st.id} style={{padding:'4px 10px',borderRadius:16,border:active?`2px solid ${st.color}`:'1px solid var(--border)',background:active?st.bg:'var(--bg-surface)',fontSize:11,fontFamily:'var(--font)',cursor:'pointer',fontWeight:active?700:400,color:active?st.color:'var(--text-muted)',transition:'all .15s'}} onClick={()=>{if(!active)setItemPurpose(item,st.id);}}>{st.icon} {st.label}</button>;})}
                 </div>
                 {/* Action buttons row */}
                 <div style={S.acts}>
@@ -506,11 +514,13 @@ h1{font-size:20px;font-weight:700;padding:16px 20px 4px;line-height:1.3}.price{f
       {/* ITEM ACTIONS */}
       {modal?.type==='itemActions'&&<OL close={closeModal}>
         <h3 style={S.mT}>{modal.data.title}</h3><p style={{fontSize:13,color:'var(--text-muted)',marginBottom:14}}>Lot #{modal.data.lot_number} · {fmt(modal.data.total_cost)}</p>
-        <p style={S.label}>PURPOSE</p>
-        <div style={{display:'flex',gap:8,marginBottom:14}}><button style={{...S.togBtn,...(modal.data.purpose!=='personal'?S.togOn:{})}} onClick={()=>{setItemPurpose(modal.data,'for_sale');closeModal();}}>🏷 For Sale</button><button style={{...S.togBtn,...(modal.data.purpose==='personal'?S.togOn:{})}} onClick={()=>{setItemPurpose(modal.data,'personal');closeModal();}}>🏠 Personal</button></div>
-        {modal.data.purpose!=='personal'&&<><p style={S.label}>LISTING</p><MBtn icon="📋" label="Pending List" onClick={()=>{setListingStatus(modal.data,'pending_list');closeModal();}}/><MBtn icon="🟢" label="Go Live" onClick={()=>setModal({type:'goLive',data:modal.data})}/>{(modal.data.listing_status==='pending_list'||modal.data.listing_status==='live_listed')&&<MBtn icon="↩️" label="Unlist" onClick={()=>{setListingStatus(modal.data,'none');closeModal();}}/>}</>}
-        <div style={{borderTop:'1px solid var(--border)',marginTop:10,paddingTop:10}}>
+        <p style={S.label}>STATUS</p>
+        <div style={{display:'flex',gap:4,flexWrap:'wrap',marginBottom:14}}>
+          {ITEM_STATUSES.map(st=>{const active=getItemStatus(modal.data)===st.id;return<button key={st.id} style={{padding:'6px 12px',borderRadius:20,border:active?`2px solid ${st.color}`:'1px solid var(--border)',background:active?st.bg:'var(--bg-surface)',fontSize:12,fontFamily:'var(--font)',cursor:'pointer',fontWeight:active?700:400,color:active?st.color:'var(--text-muted)'}} onClick={()=>{setItemPurpose(modal.data,st.id);closeModal();}}>{st.icon} {st.label}</button>;})}
+        </div>
+        <div style={{borderTop:'1px solid var(--border)',paddingTop:10}}>
           <MBtn icon="💰" label="Sell" onClick={()=>{closeModal();setTimeout(()=>setModal({type:'sell',data:modal.data}),50);}}/>
+          <MBtn icon="📤" label="Share with Customer" onClick={()=>{closeModal();setTimeout(()=>openCustomerShare(modal.data),50);}}/>
           <MBtn icon="💬" label="Notes" onClick={()=>{const d=modal.data;closeModal();setTimeout(()=>{setModal({type:'notes',data:d,isSold:false});loadItemNotes(d.id,null);},50);}}/>
           <MBtn icon="📷" label="Photos" onClick={()=>{const d=modal.data;closeModal();setTimeout(()=>{setModal({type:'photos',data:d});loadPhotos(d.id);},50);}}/>
           <MBtn icon="🔄" label="Timeline" onClick={()=>{const d=modal.data;closeModal();setTimeout(()=>handleLC(d,false),50);}}/>
@@ -551,33 +561,53 @@ h1{font-size:20px;font-weight:700;padding:16px 20px 4px;line-height:1.3}.price{f
         </div>
       </div>}
 
-      {/* CUSTOMER SHARE — ask price, then share clean view */}
+      {/* CUSTOMER SHARE — full visual with ALL photos */}
       {modal?.type==='customerShare'&&<OL close={closeModal}>
         <h3 style={S.mT}>📤 Share with Customer</h3>
-        <p style={{fontSize:13,color:'var(--text-muted)',marginBottom:12}}>{modal.data.title}</p>
+        <p style={{fontSize:13,color:'var(--text-muted)',marginBottom:10}}>Send product details with all photos and price</p>
 
-        {/* Preview card */}
-        {(()=>{const photos=itemPhotos[modal.data.id]||[];const url=photos[0]?.url;return<div style={{background:'var(--bg-surface)',borderRadius:14,padding:12,marginBottom:14,textAlign:'center'}}>
-          {url?<img src={url} alt="" style={{width:'100%',maxHeight:180,objectFit:'cover',borderRadius:10,marginBottom:8}}/>:<div style={{width:'100%',height:100,background:'var(--border)',borderRadius:10,display:'flex',alignItems:'center',justifyContent:'center',color:'var(--text-muted)',marginBottom:8}}>No Photo</div>}
-          <p style={{fontSize:16,fontWeight:700}}>{modal.data.title}</p>
-          {sharePrice&&<p style={{fontSize:22,fontWeight:800,color:'var(--accent)',marginTop:4}}>${parseFloat(sharePrice).toFixed(2)}</p>}
-          <p style={{fontSize:10,color:'var(--text-hint)',marginTop:4}}>This is how the customer will see it</p>
+        {/* Live preview with ALL photos */}
+        {(()=>{const photos=(itemPhotos[modal.data.id]||[]).filter(p=>p.url);return<div style={{background:'var(--bg-surface)',borderRadius:14,padding:12,marginBottom:14}}>
+          {photos.length>0?<div style={{display:'flex',gap:6,overflowX:'auto',marginBottom:10,paddingBottom:4}}>
+            {photos.map((p,i)=><img key={p.id||i} src={p.url} alt="" style={{width:photos.length===1?'100%':140,height:photos.length===1?'auto':140,minHeight:100,borderRadius:10,objectFit:'cover',flexShrink:0}}/>)}
+          </div>:<div style={{width:'100%',height:100,background:'var(--border)',borderRadius:10,display:'flex',alignItems:'center',justifyContent:'center',color:'var(--text-muted)',marginBottom:10}}>No Photos — add photos first</div>}
+          <p style={{fontSize:17,fontWeight:700,marginBottom:4}}>{modal.data.title}</p>
+          {sharePrice&&<p style={{fontSize:24,fontWeight:800,color:'var(--accent)'}}>${parseFloat(sharePrice).toFixed(2)}</p>}
+          <p style={{fontSize:10,color:'var(--text-hint)',marginTop:6}}>Customer will see: photos + name + price only</p>
         </div>;})()}
 
         {/* Price input */}
-        <Lbl t="Price to show customer *"/>
-        <input style={S.inp} type="number" step="0.01" placeholder="0.00" value={sharePrice} onChange={e=>setSharePrice(e.target.value)} autoFocus/>
+        <Lbl t="Asking Price *"/>
+        <input style={S.inp} type="number" step="0.01" placeholder="Enter price for customer" value={sharePrice} onChange={e=>setSharePrice(e.target.value)} autoFocus/>
 
-        {/* Share buttons */}
-        <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:8,marginTop:14}}>
-          <button style={{...S.btn1,fontSize:13,padding:'12px'}} disabled={!sharePrice} onClick={()=>{const html=generateCustomerView(modal.data,sharePrice);const w=window.open('','_blank','width=480,height=700');w.document.write(html);w.document.close();}}>👁 Preview</button>
-          <button style={{...S.btn2,fontSize:13,padding:'12px'}} disabled={!sharePrice} onClick={()=>{const text=buildShareText(modal.data,sharePrice);openWhatsApp('',text);notify('ok','Opening WhatsApp');}}>📱 WhatsApp</button>
-          <button style={{...S.btn2,fontSize:13,padding:'12px'}} disabled={!sharePrice} onClick={()=>{const text=buildShareText(modal.data,sharePrice);openSMS('',text);notify('ok','Opening SMS');}}>💬 SMS</button>
-          <button style={{...S.btn2,fontSize:13,padding:'12px'}} disabled={!sharePrice} onClick={()=>{const text=buildShareText(modal.data,sharePrice);navigator.clipboard?.writeText(text);notify('ok','Copied to clipboard');}}>📋 Copy Text</button>
+        {/* Share actions */}
+        <div style={{display:'flex',flexDirection:'column',gap:8,marginTop:14}}>
+          {/* Preview opens full page */}
+          <button style={{...S.btn1,width:'100%',fontSize:14,padding:'14px'}} disabled={!sharePrice} onClick={()=>{const html=generateCustomerView(modal.data,sharePrice);const w=window.open('','_blank','width=480,height=800');w.document.write(html);w.document.close();}}>👁 Preview Customer Page</button>
+
+          {/* Share via Web Share API (native share sheet on mobile) */}
+          {'share' in navigator && <button style={{...S.btn1,width:'100%',fontSize:14,padding:'14px',background:'var(--green)'}} disabled={!sharePrice} onClick={async()=>{
+            const photos=(itemPhotos[modal.data.id]||[]).filter(p=>p.url);
+            const text=`${modal.data.title}\nPrice: $${parseFloat(sharePrice).toFixed(2)}`;
+            try{
+              // Try sharing with image if possible
+              if(photos.length>0){try{const resp=await fetch(photos[0].url);const blob=await resp.blob();const file=new File([blob],`${modal.data.title}.jpg`,{type:blob.type||'image/jpeg'});await navigator.share({title:modal.data.title,text:`Price: $${parseFloat(sharePrice).toFixed(2)}`,files:[file]});notify('ok','Shared!');return;}catch(e){}}
+              // Fallback: text only share
+              await navigator.share({title:modal.data.title,text});notify('ok','Shared!');
+            }catch(e){if(e.name!=='AbortError')notify('err','Share failed');}
+          }}>📤 Share (WhatsApp, Messenger, Email...)</button>}
+
+          {/* Individual channels */}
+          <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:8}}>
+            <button style={{...S.btn2,fontSize:13,padding:'12px'}} disabled={!sharePrice} onClick={()=>{const text=`${modal.data.title}\nPrice: $${parseFloat(sharePrice).toFixed(2)}`;openWhatsApp('',text);}}>📱 WhatsApp</button>
+            <button style={{...S.btn2,fontSize:13,padding:'12px'}} disabled={!sharePrice} onClick={()=>{const text=encodeURIComponent(`${modal.data.title}\nPrice: $${parseFloat(sharePrice).toFixed(2)}`);window.open(`fb-messenger://share?link=${encodeURIComponent('.')}&quote=${text}`,'_blank');notify('ok','Opening Messenger');}}>💬 Messenger</button>
+            <button style={{...S.btn2,fontSize:13,padding:'12px'}} disabled={!sharePrice} onClick={()=>{const subj=encodeURIComponent(modal.data.title);const photos=(itemPhotos[modal.data.id]||[]).filter(p=>p.url);const photoLinks=photos.map(p=>`\n📷 ${p.url}`).join('');const body=encodeURIComponent(`${modal.data.title}\nPrice: $${parseFloat(sharePrice).toFixed(2)}\n${photoLinks}`);window.open(`mailto:?subject=${subj}&body=${body}`,'_blank');}}>📧 Email</button>
+            <button style={{...S.btn2,fontSize:13,padding:'12px'}} disabled={!sharePrice} onClick={()=>{const text=`${modal.data.title} - $${parseFloat(sharePrice).toFixed(2)}`;openSMS('',text);}}>📩 SMS</button>
+          </div>
+
+          {/* Copy with photo links */}
+          <button style={{...S.btn2,width:'100%',fontSize:13}} disabled={!sharePrice} onClick={()=>{const photos=(itemPhotos[modal.data.id]||[]).filter(p=>p.url);const photoLinks=photos.map((p,i)=>`Photo ${i+1}: ${p.url}`).join('\n');const text=`${modal.data.title}\nPrice: $${parseFloat(sharePrice).toFixed(2)}${photoLinks?'\n\n'+photoLinks:''}`;navigator.clipboard?.writeText(text);notify('ok','Copied with photo links!');}}>📋 Copy All (text + photo links)</button>
         </div>
-
-        {/* Email option */}
-        <button style={{...S.btn2,width:'100%',marginTop:8,fontSize:13}} disabled={!sharePrice} onClick={()=>{const subj=encodeURIComponent(modal.data.title);const body=encodeURIComponent(buildShareText(modal.data,sharePrice));window.open(`mailto:?subject=${subj}&body=${body}`,'_blank');notify('ok','Opening email');}}>📧 Email</button>
       </OL>}
 
       {/* GO LIVE */}
