@@ -9,6 +9,24 @@ export function onAuthChange(callback) { return supabase.auth.onAuthStateChange(
 
 // ─── Invoices ───
 export async function getInvoices() { const { data, error } = await supabase.from('invoices').select('*').order('created_at', { ascending: false }); if (error) throw error; return data || []; }
+export async function findDuplicateInvoice(invoiceNumber, auctionHouse, grandTotal, date, fileName) {
+  // Check by invoice_number + auction_house
+  if (invoiceNumber && auctionHouse) {
+    const { data } = await supabase.from('invoices').select('id,auction_house,invoice_number,date,grand_total').ilike('invoice_number', invoiceNumber.toString().trim()).ilike('auction_house', `%${auctionHouse.trim()}%`).limit(1);
+    if (data && data.length > 0) return data[0];
+  }
+  // Check by grand_total + date + auction_house (catches renamed invoice numbers)
+  if (grandTotal && date && auctionHouse) {
+    const { data } = await supabase.from('invoices').select('id,auction_house,invoice_number,date,grand_total').eq('date', date).ilike('auction_house', `%${auctionHouse.trim()}%`).gte('grand_total', parseFloat(grandTotal) - 0.02).lte('grand_total', parseFloat(grandTotal) + 0.02).limit(1);
+    if (data && data.length > 0) return data[0];
+  }
+  // Check by exact file name (catches re-uploading the same file)
+  if (fileName) {
+    const { data } = await supabase.from('invoices').select('id,auction_house,invoice_number,date,grand_total,file_name').eq('file_name', fileName).limit(1);
+    if (data && data.length > 0) return data[0];
+  }
+  return null;
+}
 export async function insertInvoice(invoice) { const user = await getUser(); const { data, error } = await supabase.from('invoices').insert({ ...invoice, user_id: user.id }).select().single(); if (error) throw error; return data; }
 export async function deleteInvoice(id) { const { error } = await supabase.from('invoices').delete().eq('id', id); if (error) throw error; }
 export async function updateInvoice(id, updates) { const { data, error } = await supabase.from('invoices').update(updates).eq('id', id).select().single(); if (error) throw error; return data; }
