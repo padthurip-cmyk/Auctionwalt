@@ -93,6 +93,7 @@ export default function App() {
   const [savedReturns, setSavedReturns] = useState(() => { try { return JSON.parse(localStorage.getItem('av_returns') || '[]'); } catch { return []; } });
   const [returnTab, setReturnTab] = useState('new');
   const [printIncludeInvoice, setPrintIncludeInvoice] = useState(false);
+  const [quickSellData, setQuickSellData] = useState({ price: '', payMethod: 'cash', deliveryCharge: '' });
 
   const notify = useCallback((t, m) => { setToast({ t, m }); setTimeout(() => setToast(null), t === 'err' ? 8000 : 4000); }, []);
   const closeModal = () => { setModal(null); setReceiptHtml(''); setBillHtml(''); setViewInvUrl(null); setInvDetailItems([]); setInvDetailTab('items'); setLcEvents([]); setEmailTo(''); setBillItems([]); setBillSearch(''); setItemNotes([]); setNoteForm({ category: 'product_defect', note: '' }); setSf({ amount: '', platform: '', buyer: '', buyerEmail: '', buyerPhone: '', billStatus: 'paid', includeHst: true, listingUrl: '' }); setExtractBusy(false); setExtractData(null); setInvItemLots({}); setInvPrintSelections({}); setInvPhotoItemId(null); setInvPhotoLot(''); setPhotoPreview(null); setSharePrice(''); setPrintIncludeInvoice(false); };
@@ -121,22 +122,30 @@ export default function App() {
   const loadItemNotes = useCallback(async (itemId, soldItemId) => { try { const n = await db.getNotes(itemId, soldItemId); setItemNotes(n); } catch (e) {} }, []);
 
   const handleUpload = useCallback(async (e) => {
-    const file = e.target.files?.[0]; if (!file) return;
+    const files = Array.from(e.target.files || []); if (!files.length) return;
     setUploadBusy(true);
     try {
-      const b64 = await readFileAsBase64(file);
+      // Read all files as base64
+      const pages = [];
+      for (const file of files) {
+        const b64 = await readFileAsBase64(file);
+        pages.push({ base64: b64, fileType: file.type, fileName: file.name });
+      }
       let result;
       try {
-        result = await parseInvoiceAI(b64, file.type);
+        if (pages.length === 1) {
+          result = await parseInvoiceAI(pages[0].base64, pages[0].fileType);
+        } else {
+          result = await parseInvoiceAI(null, null, pages);
+        }
       } catch (apiErr) {
-        // Close overlay FIRST so error toast is visible
         setUploadBusy(false);
         if (fileRef.current) fileRef.current.value = '';
         const msg = apiErr.message || 'Unknown error';
         if (msg.includes('AbortError') || msg.includes('too long') || msg.includes('timed out')) {
-          notify('err', 'Invoice analysis timed out. Try uploading a clearer/smaller image or PDF.');
+          notify('err', 'Invoice analysis timed out. Try fewer/smaller images.');
         } else if (msg.includes('Failed to fetch') || msg.includes('NetworkError') || msg.includes('502') || msg.includes('503')) {
-          notify('err', 'Server timed out. The invoice may be too large. Try a smaller file or upload again.');
+          notify('err', 'Server timed out. Try fewer pages or smaller files.');
         } else {
           notify('err', `Upload failed: ${msg}`);
         }
@@ -145,28 +154,28 @@ export default function App() {
       if (!result || !result.invoice || !result.items || result.items.length === 0) {
         setUploadBusy(false);
         if (fileRef.current) fileRef.current.value = '';
-        notify('err', 'Could not extract items from this invoice. Try a clearer image or PDF.');
+        notify('err', 'Could not extract items. Try clearer images or PDF.');
         return;
       }
-      // ── Duplicate check: query DATABASE directly ──
       const ri = result.invoice;
-      const dup = await db.findDuplicateInvoice(ri.invoice_number, ri.auction_house, ri.grand_total, ri.date, file.name);
+      const dup = await db.findDuplicateInvoice(ri.invoice_number, ri.auction_house, ri.grand_total, ri.date, pages[0].fileName);
       if (dup) {
         setUploadBusy(false);
         if (fileRef.current) fileRef.current.value = '';
-        notify('err', `⚠️ Duplicate! "${dup.auction_house || 'Invoice'} #${dup.invoice_number || ''}" (${fmtDate(dup.date)}, ${fmt(dup.grand_total)}) already exists.`);
+        notify('err', `⚠️ Duplicate! "${dup.auction_house || 'Invoice'} #${dup.invoice_number || ''}" already exists.`);
         return;
       }
+      // Upload first file as the invoice file
       const tempId = uid();
-      const filePath = await db.uploadInvoiceFile(tempId, b64, file.name, file.type);
-      const newInv = await db.insertInvoice({ date: result.invoice.date, auction_house: result.invoice.auction_house, invoice_number: result.invoice.invoice_number, event_description: result.invoice.event_description, payment_method: result.invoice.payment_method, payment_status: result.invoice.payment_status || 'Due', pickup_location: result.invoice.pickup_location, buyer_premium_rate: result.invoice.buyer_premium_rate, tax_rate: result.invoice.tax_rate, lot_total: result.invoice.lot_total, premium_total: result.invoice.premium_total, tax_total: result.invoice.tax_total, grand_total: result.invoice.grand_total, file_name: file.name, file_type: file.type, file_path: filePath, item_count: result.items.length });
+      const filePath = await db.uploadInvoiceFile(tempId, pages[0].base64, pages[0].fileName, pages[0].fileType);
+      const newInv = await db.insertInvoice({ date: result.invoice.date, auction_house: result.invoice.auction_house, invoice_number: result.invoice.invoice_number, event_description: result.invoice.event_description, payment_method: result.invoice.payment_method, payment_status: result.invoice.payment_status || 'Due', pickup_location: result.invoice.pickup_location, buyer_premium_rate: result.invoice.buyer_premium_rate, tax_rate: result.invoice.tax_rate, lot_total: result.invoice.lot_total, premium_total: result.invoice.premium_total, tax_total: result.invoice.tax_total, grand_total: result.invoice.grand_total, file_name: pages[0].fileName, file_type: pages[0].fileType, file_path: filePath, item_count: result.items.length });
       const pr = result.invoice.buyer_premium_rate || 0, tr = result.invoice.tax_rate || 0.13;
       const rows = result.items.map(it => ({ invoice_id: newInv.id, lot_number: it.lot_number, title: it.title, description: it.description, quantity: it.quantity || 1, hammer_price: it.hammer_price, premium_rate: pr, tax_rate: tr, premium_amount: +(it.hammer_price * pr).toFixed(2), subtotal: +(it.hammer_price * (1 + pr)).toFixed(2), tax_amount: +(it.hammer_price * (1 + pr) * tr).toFixed(2), total_cost: +(it.hammer_price * (1 + pr) * (1 + tr)).toFixed(2), auction_house: result.invoice.auction_house, date: result.invoice.date, pickup_location: result.invoice.pickup_location, payment_method: result.invoice.payment_method, status: 'in_inventory', purpose: 'for_sale', listing_status: 'none' }));
       const inserted = await db.insertItems(rows);
       const now = new Date().toISOString();
       await db.addLifecycleEvents(inserted.flatMap(it => [{ item_id: it.id, event: 'Purchased', detail: `${result.invoice.auction_house}`, created_at: now }, { item_id: it.id, event: 'In Inventory', detail: `Lot #${it.lot_number} · ${fmt(it.total_cost)}`, created_at: now }]));
       setUploadBusy(false);
-      await load(); notify('ok', `✅ ${result.items.length} items from ${result.invoice.auction_house}`);
+      await load(); notify('ok', `✅ ${result.items.length} items from ${result.invoice.auction_house} (${pages.length} page${pages.length>1?'s':''})`);
     } catch (err) {
       setUploadBusy(false);
       notify('err', `Upload failed: ${err.message}`);
@@ -237,13 +246,13 @@ export default function App() {
       <div class="ft"><div class="hl"></div><p class="pn">Page ${pi + 1} of ${pages.length}</p></div>
     </div>`).join('');
     const detStyle = detailed ? `
-      .ic.det{flex-direction:row;align-items:flex-start;gap:4mm;min-height:auto;padding:3mm}
-      .det .ip{width:38mm;height:38mm;flex-shrink:0}
-      .det .ii{flex:1}
+      .ic.det{flex-direction:row;align-items:flex-start;gap:5mm;min-height:auto;max-height:58mm;padding:3mm;overflow:hidden}
+      .det .ip{width:48mm;height:48mm;flex-shrink:0}
+      .det .ii{flex:1;padding-left:2mm}
       .det .ii h2{font-size:11pt;margin-bottom:1.5mm}
-      .det table{font-size:8.5pt;margin:0}.det td{padding:0.8mm 2mm;border-bottom:0.5px solid #eee}.det td:first-child{width:70px;color:#888}
-      .items{gap:3mm}` : '';
-    const html = `<!DOCTYPE html><html><head><meta charset="utf-8"/><title>Print</title><style>@page{size:A4 portrait;margin:0}*{margin:0;padding:0;box-sizing:border-box}body{font-family:-apple-system,'Segoe UI',Arial,sans-serif;background:#fff;color:#1a1a1a;-webkit-print-color-adjust:exact;print-color-adjust:exact}.page{width:210mm;min-height:297mm;padding:12mm 16mm;display:flex;flex-direction:column}.pb{page-break-before:always}.hdr{text-align:center;margin-bottom:5mm}.hdr h1{font-size:16pt;font-weight:700;margin:2mm 0 1mm}.hdr .sub{font-size:9pt;color:#666}.hl{height:1.5px;background:linear-gradient(90deg,transparent,#333 15%,#333 85%,transparent);margin:2mm 0}.items{flex:1;display:flex;flex-direction:column;gap:5mm}.ic{border:1.5px solid #ddd;border-radius:3mm;padding:4mm;display:flex;align-items:center;gap:5mm;min-height:60mm}.ip{width:50mm;height:50mm;flex-shrink:0;border-radius:2mm;overflow:hidden;background:#f5f5f5;display:flex;align-items:center;justify-content:center}.ip img{width:100%;height:100%;object-fit:cover}.np{color:#aaa;font-size:10pt}.ii{flex:1}.ii h2{font-size:13pt;font-weight:700;margin-bottom:2mm;line-height:1.3}.ii .lot{font-size:12pt;color:#444;font-weight:600;padding:1.5mm 3mm;background:#f0f0f0;border-radius:2mm;display:inline-block;margin-top:1mm}.ft{text-align:center;margin-top:3mm}.ft .pn{font-size:8pt;color:#999}.inv-copy{border:2px solid #333;border-radius:4mm;padding:16mm;margin:16mm}.inv-copy h2{font-size:18pt;margin-bottom:6mm;text-align:center}.inv-copy table{width:100%;font-size:12pt;border-collapse:collapse}.inv-copy td{padding:3mm 4mm;border-bottom:1px solid #ddd}.inv-copy td:first-child{width:140px;color:#666}.billed-to{margin-top:8mm;padding-top:6mm;border-top:2px solid #333}.billed-to h3{font-size:13pt;margin-bottom:3mm;color:#666}.billed-to p{font-size:12pt;line-height:1.5}.orig-file{padding:8mm}.ofl{font-size:12pt;font-weight:700;margin-bottom:4mm;text-align:center;color:#666}${detStyle}</style></head><body>${invoiceCopyHtml}${pHTML}</body></html>`;
+      .det table{font-size:8.5pt;margin:0}.det td{padding:0.8mm 2mm;border-bottom:0.5px solid #eee}.det td:first-child{width:72px;color:#888}
+      .items{gap:2mm}` : '';
+    const html = `<!DOCTYPE html><html><head><meta charset="utf-8"/><title>Print</title><style>@page{size:A4 portrait;margin:0}*{margin:0;padding:0;box-sizing:border-box}body{font-family:-apple-system,'Segoe UI',Arial,sans-serif;background:#fff;color:#1a1a1a;-webkit-print-color-adjust:exact;print-color-adjust:exact}.page{width:210mm;min-height:297mm;max-height:297mm;padding:10mm 14mm;display:flex;flex-direction:column;overflow:hidden;page-break-after:always}.pb{page-break-before:always}.hdr{text-align:center;margin-bottom:4mm;flex-shrink:0}.hdr h1{font-size:15pt;font-weight:700;margin:2mm 0 1mm}.hdr .sub{font-size:9pt;color:#666}.hl{height:1px;background:linear-gradient(90deg,transparent,#333 15%,#333 85%,transparent);margin:2mm 0}.items{flex:1;display:flex;flex-direction:column;gap:4mm;overflow:hidden}.ic{border:1.5px solid #ddd;border-radius:3mm;padding:4mm;display:flex;align-items:center;gap:6mm;height:80mm;max-height:80mm;overflow:hidden}.ip{width:65mm;height:65mm;flex-shrink:0;border-radius:3mm;overflow:hidden;background:#f5f5f5;display:flex;align-items:center;justify-content:center}.ip img{width:100%;height:100%;object-fit:cover}.np{color:#aaa;font-size:10pt}.ii{flex:1;padding-left:3mm}.ii h2{font-size:14pt;font-weight:700;margin-bottom:2mm;line-height:1.3}.ii .lot{font-size:12pt;color:#444;font-weight:600;padding:1.5mm 4mm;background:#f0f0f0;border-radius:2mm;display:inline-block;margin-top:1mm}.ft{text-align:center;margin-top:auto;padding-top:2mm;flex-shrink:0}.ft .pn{font-size:8pt;color:#999}.inv-copy{border:2px solid #333;border-radius:4mm;padding:16mm;margin:16mm}.inv-copy h2{font-size:18pt;margin-bottom:6mm;text-align:center}.inv-copy table{width:100%;font-size:12pt;border-collapse:collapse}.inv-copy td{padding:3mm 4mm;border-bottom:1px solid #ddd}.inv-copy td:first-child{width:140px;color:#666}.billed-to{margin-top:8mm;padding-top:6mm;border-top:2px solid #333}.billed-to h3{font-size:13pt;margin-bottom:3mm;color:#666}.billed-to p{font-size:12pt;line-height:1.5}.orig-file{padding:8mm}.ofl{font-size:12pt;font-weight:700;margin-bottom:4mm;text-align:center;color:#666}${detStyle}</style></head><body>${invoiceCopyHtml}${pHTML}</body></html>`;
     const w = window.open('', '_blank', 'width=800,height=1000'); w.document.write(html); w.document.close(); setTimeout(() => { w.focus(); w.print(); }, 600);
   }, [itemPhotos, biz]);
 
@@ -288,6 +297,23 @@ export default function App() {
   const addNote = useCallback(async (itemId, soldItemId) => { if (!noteForm.note.trim()) return; await db.insertNote({ item_id: itemId || null, sold_item_id: soldItemId || null, category: noteForm.category, note: noteForm.note.trim() }); await db.addLifecycleEvent({ item_id: itemId || undefined, sold_item_id: soldItemId || undefined, event: 'Note Added', detail: `${getCat(noteForm.category).label}: ${noteForm.note.trim().slice(0, 50)}` }); setNoteForm({ category: 'product_defect', note: '' }); if (itemId) await loadItemNotes(itemId, null); if (soldItemId) await loadItemNotes(null, soldItemId); await load(); notify('ok', 'Note added'); }, [noteForm, load, notify, loadItemNotes]);
   const resolveNote = useCallback(async (noteId, itemId, soldItemId) => { await db.resolveNote(noteId); if (itemId) await loadItemNotes(itemId, null); if (soldItemId) await loadItemNotes(null, soldItemId); await load(); notify('ok', 'Resolved'); }, [load, notify, loadItemNotes]);
   const deleteNoteById = useCallback(async (noteId, itemId, soldItemId) => { if (!confirm('Delete?')) return; await db.deleteNote(noteId); if (itemId) await loadItemNotes(itemId, null); if (soldItemId) await loadItemNotes(null, soldItemId); await load(); notify('ok', 'Deleted'); }, [load, notify, loadItemNotes]);
+
+  // Quick sell — opens mini modal, moves to sales
+  const handleQuickSell = useCallback(async () => {
+    const item = modal?.data; if (!item || !quickSellData.price) return;
+    const amt = parseFloat(quickSellData.price); if (isNaN(amt)) return;
+    const del = parseFloat(quickSellData.deliveryCharge) || 0;
+    const rcpt = `BOS-${Date.now().toString(36).toUpperCase()}`;
+    const cost = parseFloat(item.total_cost); const profit = +(amt + del - cost).toFixed(2); const pct = cost > 0 ? +((profit / cost) * 100).toFixed(1) : 0;
+    const si = await db.insertSoldItem({ item_id: item.id, invoice_id: item.invoice_id, lot_number: item.lot_number, title: item.title, description: item.description, quantity: item.quantity, hammer_price: item.hammer_price, premium_rate: item.premium_rate, tax_rate: item.tax_rate, premium_amount: item.premium_amount, subtotal: item.subtotal, tax_amount: item.tax_amount, total_cost: item.total_cost, auction_house: item.auction_house, date: item.date, pickup_location: item.pickup_location, payment_method: quickSellData.payMethod, sold_price: amt + del, sold_platform: '', sold_buyer: '', receipt_number: rcpt, profit, profit_pct: pct, bill_status: 'paid', paid_at: new Date().toISOString() });
+    await db.deleteItem(item.id);
+    const oldLc = await db.getLifecycle(item.id, null);
+    if (oldLc.length) await db.addLifecycleEvents(oldLc.map(ev => ({ sold_item_id: si.id, event: ev.event, detail: ev.detail, created_at: ev.created_at })));
+    await db.addLifecycleEvent({ sold_item_id: si.id, event: 'Sold', detail: `${fmt(amt)}${del > 0 ? ' + ' + fmt(del) + ' delivery' : ''} · ${quickSellData.payMethod.toUpperCase()} · ${rcpt}` });
+    await load(); closeModal(); setQuickSellData({ price: '', payMethod: 'cash', deliveryCharge: '' });
+    setTab('sales'); setSaleFilter('New Bill');
+    notify('ok', `✅ Sold for ${fmt(amt + del)} · moved to Sales`);
+  }, [modal, quickSellData, load, notify]);
 
   const handleSell = useCallback(async () => {
     const item = modal?.data; if (!item || !sf.amount) return; const amt = parseFloat(sf.amount); if (isNaN(amt)) return;
@@ -410,7 +436,7 @@ export default function App() {
           </div>
           {/* Quick actions */}
           <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:10,marginBottom:16}}>
-            <label role="button" style={{...S.qAct,opacity:uploadBusy?.5:1,pointerEvents:uploadBusy?'none':'auto'}}><input ref={fileRef} type="file" accept=".pdf,.png,.jpg,.jpeg,.webp" onChange={handleUpload} style={{display:'none'}}/><span style={{fontSize:28,marginBottom:4}}>{uploadBusy?'⏳':'📄'}</span><span style={{fontSize:13,fontWeight:700}}>{uploadBusy?'Analyzing...':'Upload Invoice'}</span></label>
+            <label role="button" style={{...S.qAct,opacity:uploadBusy?.5:1,pointerEvents:uploadBusy?'none':'auto'}}><input ref={fileRef} type="file" accept=".pdf,.png,.jpg,.jpeg,.webp" multiple onChange={handleUpload} style={{display:'none'}}/><span style={{fontSize:28,marginBottom:4}}>{uploadBusy?'⏳':'📄'}</span><span style={{fontSize:13,fontWeight:700}}>{uploadBusy?'Analyzing...':'Upload Invoice'}</span></label>
             <div style={S.qAct} onClick={()=>{setTab('sales');setSaleFilter('New Bill');setModal({type:'billOfSale'});}}><span style={{fontSize:28,marginBottom:4}}>🧾</span><span style={{fontSize:13,fontWeight:700}}>Bill of Sale</span></div>
           </div>
           {/* Summary cards */}
@@ -433,7 +459,7 @@ export default function App() {
           <div style={S.hdr}>
             <div style={{display:'flex',justifyContent:'space-between',alignItems:'center'}}>
               <div><h1 style={{fontSize:24,fontWeight:800}}>Invoices</h1><p style={{fontSize:13,color:'var(--text-muted)'}}>{invoices.length} total · {fmt(invoices.reduce((s,i)=>s+parseFloat(i.grand_total||0),0))}</p></div>
-              <label role="button" style={{...S.btn1,padding:'10px 16px',fontSize:13,opacity:uploadBusy?.5:1}}><input ref={fileRef} type="file" accept=".pdf,.png,.jpg,.jpeg,.webp" onChange={handleUpload} style={{display:'none'}}/>{uploadBusy?'⏳ Analyzing...':'📄 Upload'}</label>
+              <label role="button" style={{...S.btn1,padding:'10px 16px',fontSize:13,opacity:uploadBusy?.5:1}}><input ref={fileRef} type="file" accept=".pdf,.png,.jpg,.jpeg,.webp" multiple onChange={handleUpload} style={{display:'none'}}/>{uploadBusy?'⏳ Analyzing...':'📄 Upload'}</label>
             </div>
           </div>
           {/* Status pills */}
@@ -525,7 +551,7 @@ export default function App() {
                 </div>
                 {/* Status chips row */}
                 <div style={{display:'flex',gap:4,padding:'6px 14px',flexWrap:'wrap'}}>
-                  {ITEM_STATUSES.map(st=>{const active=getItemStatus(item)===st.id;return<button key={st.id} style={{padding:'4px 10px',borderRadius:16,border:active?`2px solid ${st.color}`:'1px solid var(--border)',background:active?st.bg:'var(--bg-surface)',fontSize:11,fontFamily:'var(--font)',cursor:'pointer',fontWeight:active?700:400,color:active?st.color:'var(--text-muted)',transition:'all .15s'}} onClick={()=>{if(!active)setItemPurpose(item,st.id);}}>{st.icon} {st.label}</button>;})}
+                  {ITEM_STATUSES.map(st=>{const active=getItemStatus(item)===st.id;return<button key={st.id} style={{padding:'4px 10px',borderRadius:16,border:active?`2px solid ${st.color}`:'1px solid var(--border)',background:active?st.bg:'var(--bg-surface)',fontSize:11,fontFamily:'var(--font)',cursor:'pointer',fontWeight:active?700:400,color:active?st.color:'var(--text-muted)',transition:'all .15s'}} onClick={()=>{if(active)return;if(st.id==='sold'){setQuickSellData({price:'',payMethod:'cash',deliveryCharge:''});setModal({type:'quickSell',data:item});}else setItemPurpose(item,st.id);}}>{st.icon} {st.label}</button>;})}
                 </div>
                 {/* Action buttons row */}
                 <div style={S.acts}>
@@ -727,7 +753,7 @@ export default function App() {
         {/* Status chips */}
         <p style={{...S.label,marginBottom:6}}>STATUS</p>
         <div style={{display:'flex',gap:4,flexWrap:'wrap',marginBottom:14}}>
-          {ITEM_STATUSES.map(s=>{const active=getItemStatus(it)===s.id;return<button key={s.id} style={{padding:'5px 10px',borderRadius:16,border:active?`2px solid ${s.color}`:'1px solid var(--border)',background:active?s.bg:'var(--bg-surface)',fontSize:11,fontFamily:'var(--font)',cursor:'pointer',fontWeight:active?700:400,color:active?s.color:'var(--text-muted)'}} onClick={()=>{setItemPurpose(it,s.id);closeModal();}}>{s.icon} {s.label}</button>;})}
+          {ITEM_STATUSES.map(s=>{const active=getItemStatus(it)===s.id;return<button key={s.id} style={{padding:'5px 10px',borderRadius:16,border:active?`2px solid ${s.color}`:'1px solid var(--border)',background:active?s.bg:'var(--bg-surface)',fontSize:11,fontFamily:'var(--font)',cursor:'pointer',fontWeight:active?700:400,color:active?s.color:'var(--text-muted)'}} onClick={()=>{if(s.id==='sold'){closeModal();setTimeout(()=>{setQuickSellData({price:'',payMethod:'cash',deliveryCharge:''});setModal({type:'quickSell',data:it});},50);}else{setItemPurpose(it,s.id);closeModal();}}}>{s.icon} {s.label}</button>;})}
         </div>
 
         {/* Actions */}
@@ -799,7 +825,7 @@ export default function App() {
         <h3 style={S.mT}>{modal.data.title}</h3><p style={{fontSize:13,color:'var(--text-muted)',marginBottom:14}}>Lot #{modal.data.lot_number} · {fmt(modal.data.total_cost)}</p>
         <p style={S.label}>STATUS</p>
         <div style={{display:'flex',gap:4,flexWrap:'wrap',marginBottom:14}}>
-          {ITEM_STATUSES.map(st=>{const active=getItemStatus(modal.data)===st.id;return<button key={st.id} style={{padding:'6px 12px',borderRadius:20,border:active?`2px solid ${st.color}`:'1px solid var(--border)',background:active?st.bg:'var(--bg-surface)',fontSize:12,fontFamily:'var(--font)',cursor:'pointer',fontWeight:active?700:400,color:active?st.color:'var(--text-muted)'}} onClick={()=>{setItemPurpose(modal.data,st.id);closeModal();}}>{st.icon} {st.label}</button>;})}
+          {ITEM_STATUSES.map(st=>{const active=getItemStatus(modal.data)===st.id;return<button key={st.id} style={{padding:'6px 12px',borderRadius:20,border:active?`2px solid ${st.color}`:'1px solid var(--border)',background:active?st.bg:'var(--bg-surface)',fontSize:12,fontFamily:'var(--font)',cursor:'pointer',fontWeight:active?700:400,color:active?st.color:'var(--text-muted)'}} onClick={()=>{if(st.id==='sold'){const d=modal.data;closeModal();setTimeout(()=>{setQuickSellData({price:'',payMethod:'cash',deliveryCharge:''});setModal({type:'quickSell',data:d});},50);}else{setItemPurpose(modal.data,st.id);closeModal();}}}>{st.icon} {st.label}</button>;})}
         </div>
         <div style={{borderTop:'1px solid var(--border)',paddingTop:10}}>
           <MBtn icon="💰" label="Sell" onClick={()=>{closeModal();setTimeout(()=>setModal({type:'sell',data:modal.data}),50);}}/>
@@ -843,6 +869,26 @@ export default function App() {
           <button style={{...S.btn2,padding:'12px 24px',fontSize:14,color:'#fff',borderColor:'rgba(255,255,255,.3)'}} onClick={()=>setPhotoPreview(null)}>✕ Close</button>
         </div>
       </div>}
+
+      {/* QUICK SELL — from Sold status chip */}
+      {modal?.type==='quickSell'&&<OL close={closeModal}>
+        <h3 style={S.mT}>✅ Quick Sell</h3>
+        <p style={{fontSize:13,color:'var(--text-muted)',marginBottom:12}}>{modal.data.title} · Cost: {fmt(modal.data.total_cost)}</p>
+        {(()=>{const ph=(itemPhotos[modal.data.id]||[])[0];return ph?.url?<img src={ph.url} alt="" style={{width:'100%',height:120,objectFit:'cover',borderRadius:10,marginBottom:12}}/>:null;})()}
+        <Lbl t="Sold Price *"/>
+        <input style={S.inp} type="number" step="0.01" placeholder="0.00" value={quickSellData.price} onChange={e=>setQuickSellData({...quickSellData,price:e.target.value})} autoFocus/>
+        <Lbl t="Payment Method"/>
+        <div style={{display:'flex',gap:6,marginBottom:10}}>
+          {['cash','interac','credit','other'].map(m=><button key={m} style={{flex:1,padding:'10px',borderRadius:10,border:quickSellData.payMethod===m?'2px solid var(--accent)':'1px solid var(--border)',background:quickSellData.payMethod===m?'var(--accent-light)':'var(--bg-surface)',fontSize:12,fontFamily:'var(--font)',cursor:'pointer',fontWeight:quickSellData.payMethod===m?700:400,color:quickSellData.payMethod===m?'var(--accent)':'var(--text-muted)',textTransform:'capitalize'}} onClick={()=>setQuickSellData({...quickSellData,payMethod:m})}>{m}</button>)}
+        </div>
+        <Lbl t="Delivery Charge"/>
+        <input style={S.inp} type="number" step="0.01" placeholder="0.00 (optional)" value={quickSellData.deliveryCharge} onChange={e=>setQuickSellData({...quickSellData,deliveryCharge:e.target.value})}/>
+        {quickSellData.price&&(()=>{const sub=parseFloat(quickSellData.price);const del=parseFloat(quickSellData.deliveryCharge)||0;const total=sub+del;const p=total-parseFloat(modal.data.total_cost);return<div style={{background:p>=0?'var(--green-light)':'var(--red-light)',padding:'12px 14px',borderRadius:10,marginTop:10}}>
+          <div style={{display:'flex',justifyContent:'space-between',marginBottom:4}}><span style={{fontSize:13}}>Price + Delivery</span><span style={{fontSize:14,fontWeight:700}}>{fmt(total)}</span></div>
+          <div style={{display:'flex',justifyContent:'space-between'}}><span style={{fontSize:13}}>Profit</span><span style={{fontSize:14,fontWeight:700,color:p>=0?'var(--green)':'var(--red)'}}>{p>=0?'+':''}{fmt(p)}</span></div>
+        </div>;})()}
+        <button style={{...S.btn1,width:'100%',marginTop:14}} onClick={handleQuickSell} disabled={!quickSellData.price}>✅ Mark as Sold</button>
+      </OL>}
 
       {/* CUSTOMER SHARE — full visual with ALL photos */}
       {modal?.type==='customerShare'&&<OL close={closeModal}>
