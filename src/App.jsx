@@ -679,7 +679,7 @@ export default function App() {
             {[['Business Name','business_name'],['Address','address'],['Phone','phone'],['Email','email'],['HST #','hst']].map(([l,k])=><div key={k}><label style={S.label}>{l}</label><input style={S.inp} value={biz[k]||''} onChange={e=>setBiz({...biz,[k]:e.target.value})}/></div>)}
             <button style={{...S.btn1,width:'100%',marginTop:14}} onClick={async()=>{await db.upsertSettings(biz);notify('ok','Saved');}}>Save</button>
           </div>
-          <button style={{width:'100%',padding:14,marginTop:16,background:'var(--red-light)',border:'1px solid var(--red)',borderRadius:12,color:'var(--red)',fontSize:14,fontFamily:'var(--font)',cursor:'pointer'}} onClick={async()=>{if(!confirm('Delete ALL data?'))return;await db.clearAllData();await load();notify('ok','Cleared');}}>Reset All Data</button>
+          <button style={{width:'100%',padding:14,marginTop:16,background:'var(--red-light)',border:'1px solid var(--red)',borderRadius:12,color:'var(--red)',fontSize:14,fontFamily:'var(--font)',cursor:'pointer'}} onClick={async()=>{if(!confirm('⚠️ WARNING: This will permanently delete ALL your invoices, items, photos, sales, and notes. This CANNOT be undone.\n\nAre you absolutely sure?'))return;const typed=prompt('Type DELETE to confirm:');if(typed!=='DELETE'){notify('ok','Cancelled — data is safe');return;}await db.clearAllData();await load();notify('ok','All data cleared');}}>⚠️ Reset All Data</button>
         </>}
       </main>
 
