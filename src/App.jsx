@@ -551,7 +551,7 @@ export default function App() {
                 </div>
                 {/* Status chips row */}
                 <div style={{display:'flex',gap:4,padding:'6px 14px',flexWrap:'wrap'}}>
-                  {ITEM_STATUSES.map(st=>{const active=getItemStatus(item)===st.id;return<button key={st.id} style={{padding:'4px 10px',borderRadius:16,border:active?`2px solid ${st.color}`:'1px solid var(--border)',background:active?st.bg:'var(--bg-surface)',fontSize:11,fontFamily:'var(--font)',cursor:'pointer',fontWeight:active?700:400,color:active?st.color:'var(--text-muted)',transition:'all .15s'}} onClick={()=>{if(active)return;if(st.id==='sold'){setQuickSellData({price:'',payMethod:'cash',deliveryCharge:''});setModal({type:'quickSell',data:item});}else setItemPurpose(item,st.id);}}>{st.icon} {st.label}</button>;})}
+                  {ITEM_STATUSES.map(st=>{const active=getItemStatus(item)===st.id;return<button key={st.id} style={{padding:'4px 10px',borderRadius:16,border:active?`2px solid ${st.color}`:'1px solid var(--border)',background:active?st.bg:'var(--bg-surface)',fontSize:11,fontFamily:'var(--font)',cursor:'pointer',fontWeight:active?700:400,color:active?st.color:'var(--text-muted)',transition:'all .15s'}} onClick={(e)=>{e.stopPropagation();if(active)return;if(st.id==='sold'){setQuickSellData({price:'',payMethod:'cash',deliveryCharge:''});setModal({type:'quickSell',data:item});}else setItemPurpose(item,st.id);}}>{st.icon} {st.label}</button>;})}
                 </div>
                 {/* Action buttons row */}
                 <div style={S.acts}>
@@ -567,13 +567,51 @@ export default function App() {
         </>}
 
         {/* SALES */}
-        {tab==='sales'&&<>
-          <div style={S.hdr}><h1 style={{fontSize:24,fontWeight:800}}>Sales</h1><p style={{fontSize:13,color:'var(--text-muted)'}}>{fmt(totalRev)} revenue · <span style={{color:totalProfit>=0?'var(--green)':'var(--red)'}}>{totalProfit>=0?'+':''}{fmt(totalProfit)}</span></p></div>
+        {tab==='sales'&&(()=>{
+          const now=new Date();const startOfYear=new Date(now.getFullYear(),0,1);const startOfMonth=new Date(now.getFullYear(),now.getMonth(),1);const startOfWeek=new Date(now);startOfWeek.setDate(now.getDate()-now.getDay());startOfWeek.setHours(0,0,0,0);
+          const ytdSold=sold.filter(s=>new Date(s.sold_at||s.created_at)>=startOfYear);
+          const mtdSold=sold.filter(s=>new Date(s.sold_at||s.created_at)>=startOfMonth);
+          const weekSold=sold.filter(s=>new Date(s.sold_at||s.created_at)>=startOfWeek);
+          const calc=(arr)=>{const rev=arr.reduce((s,i)=>s+parseFloat(i.sold_price||0),0);const cost=arr.reduce((s,i)=>s+parseFloat(i.total_cost||0),0);const profit=arr.reduce((s,i)=>s+parseFloat(i.profit||0),0);const roi=cost>0?((profit/cost)*100).toFixed(1):0;return{rev,cost,profit,roi,count:arr.length};};
+          const ytd=calc(ytdSold);const mtd=calc(mtdSold);const wk=calc(weekSold);const all=calc(sold);
+          return<>
+          <div style={S.hdr}><h1 style={{fontSize:24,fontWeight:800}}>Sales Dashboard</h1></div>
+
+          {/* Period cards */}
+          <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:8,marginBottom:12}}>
+            {[
+              {label:'This Week',data:wk,c:'var(--accent)'},
+              {label:'This Month',data:mtd,c:'var(--blue)'},
+              {label:'Year to Date',data:ytd,c:'var(--green)'},
+              {label:'All Time',data:all,c:'#7C3AED'},
+            ].map(p=><div key={p.label} style={{...S.card,padding:'12px 14px',borderLeft:`3px solid ${p.c}`}}>
+              <p style={{fontSize:10,color:'var(--text-muted)',textTransform:'uppercase',letterSpacing:.5,marginBottom:6}}>{p.label}</p>
+              <p style={{fontSize:18,fontWeight:800,color:p.c,marginBottom:4}}>{fmt(p.data.rev)}</p>
+              <div style={{display:'flex',justifyContent:'space-between',fontSize:11,color:'var(--text-secondary)',marginBottom:2}}><span>Cost</span><span>{fmt(p.data.cost)}</span></div>
+              <div style={{display:'flex',justifyContent:'space-between',fontSize:11,marginBottom:2}}><span style={{color:'var(--text-secondary)'}}>Profit</span><span style={{fontWeight:700,color:p.data.profit>=0?'var(--green)':'var(--red)'}}>{p.data.profit>=0?'+':''}{fmt(p.data.profit)}</span></div>
+              <div style={{display:'flex',justifyContent:'space-between',fontSize:11}}><span style={{color:'var(--text-secondary)'}}>ROI</span><span style={{fontWeight:700,color:p.data.profit>=0?'var(--green)':'var(--red)'}}>{p.data.roi}%</span></div>
+              <p style={{fontSize:10,color:'var(--text-muted)',marginTop:4}}>{p.data.count} item{p.data.count!==1?'s':''}</p>
+            </div>)}
+          </div>
+
+          {/* Quick stats bar */}
+          <div style={{display:'flex',gap:6,marginBottom:14,overflowX:'auto'}}>
+            <div style={{background:'var(--bg-surface)',borderRadius:10,padding:'8px 14px',textAlign:'center',flex:1}}><p style={{fontSize:9,color:'var(--text-muted)'}}>AVG SALE</p><p style={{fontSize:15,fontWeight:700}}>{sold.length>0?fmt(all.rev/sold.length):'—'}</p></div>
+            <div style={{background:'var(--bg-surface)',borderRadius:10,padding:'8px 14px',textAlign:'center',flex:1}}><p style={{fontSize:9,color:'var(--text-muted)'}}>AVG PROFIT</p><p style={{fontSize:15,fontWeight:700,color:all.profit>=0?'var(--green)':'var(--red)'}}>{sold.length>0?fmt(all.profit/sold.length):'—'}</p></div>
+            <div style={{background:dueBills.length>0?'var(--red-light)':'var(--bg-surface)',borderRadius:10,padding:'8px 14px',textAlign:'center',flex:1}}><p style={{fontSize:9,color:dueBills.length>0?'var(--red)':'var(--text-muted)'}}>UNPAID</p><p style={{fontSize:15,fontWeight:700,color:dueBills.length>0?'var(--red)':'var(--text)'}}>{dueBills.length>0?fmt(dueBills.reduce((s,i)=>s+parseFloat(i.sold_price||0),0)):'$0'}</p></div>
+          </div>
+
+          {/* Filter pills + Bill button */}
           <div style={S.pills}>{SALE_FILTERS.map(f=><button key={f} style={{...S.pill,...(saleFilter===f?S.pillOn:{})}} onClick={()=>setSaleFilter(f)}>{f}{f==='Due'&&dueBills.length?` (${dueBills.length})`:''}</button>)}</div>
-          {saleFilter==='New Bill'&&<div><button style={{...S.btn1,width:'100%',marginBottom:14}} onClick={()=>setModal({type:'billOfSale'})}>🧾 Create Bill of Sale</button>{sold.map((si,i)=><SC key={si.id} si={si} i={i} photoUrl={(itemPhotos[si.item_id]||itemPhotos[si.id]||[])[0]?.url||null} onBill={()=>viewBill(si)} onShare={()=>setModal({type:'share',data:si})} onLC={()=>handleLC(si,true)} onNote={()=>{setModal({type:'notes',data:si,isSold:true});loadItemNotes(null,si.id);}} onMarkPaid={si.bill_status==='due'?()=>markBillPaid(si):null} onEdit={()=>openEditSold(si)} onReturn={()=>returnToInventory(si)} noteCount={allNotes.filter(n=>n.sold_item_id===si.id&&!n.is_resolved).length}/>)}</div>}
-          {saleFilter==='Due'&&<div>{dueBills.length===0?<Empty text="No unpaid bills"/>:dueBills.map((si,i)=><SC key={si.id} si={si} i={i} photoUrl={(itemPhotos[si.item_id]||itemPhotos[si.id]||[])[0]?.url||null} onBill={()=>viewBill(si)} onShare={()=>setModal({type:'share',data:si})} onLC={()=>handleLC(si,true)} onNote={()=>{setModal({type:'notes',data:si,isSold:true});loadItemNotes(null,si.id);}} onMarkPaid={()=>markBillPaid(si)} onEdit={()=>openEditSold(si)} onReturn={()=>returnToInventory(si)} noteCount={allNotes.filter(n=>n.sold_item_id===si.id&&!n.is_resolved).length}/>)}</div>}
-          {saleFilter==='Closed'&&<div>{closedBills.length===0?<Empty text="No closed bills"/>:closedBills.map((si,i)=><SC key={si.id} si={si} i={i} photoUrl={(itemPhotos[si.item_id]||itemPhotos[si.id]||[])[0]?.url||null} onBill={()=>viewBill(si)} onShare={()=>setModal({type:'share',data:si})} onLC={()=>handleLC(si,true)} onNote={()=>{setModal({type:'notes',data:si,isSold:true});loadItemNotes(null,si.id);}} onEdit={()=>openEditSold(si)} onReturn={()=>returnToInventory(si)} noteCount={allNotes.filter(n=>n.sold_item_id===si.id&&!n.is_resolved).length}/>)}</div>}
-        </>}
+          {saleFilter==='New Bill'&&<button style={{...S.btn1,width:'100%',marginBottom:14}} onClick={()=>setModal({type:'billOfSale'})}>🧾 Create Bill of Sale</button>}
+
+          {/* Items list */}
+          {(()=>{
+            const list=saleFilter==='New Bill'?sold:saleFilter==='Due'?dueBills:closedBills;
+            if(list.length===0) return <Empty text={saleFilter==='Due'?'No unpaid bills':'No sales yet'}/>;
+            return list.map((si,i)=><SC key={si.id} si={si} i={i} photoUrl={(itemPhotos[si.item_id]||itemPhotos[si.id]||[])[0]?.url||null} onBill={()=>viewBill(si)} onShare={()=>setModal({type:'share',data:si})} onLC={()=>handleLC(si,true)} onNote={()=>{setModal({type:'notes',data:si,isSold:true});loadItemNotes(null,si.id);}} onMarkPaid={si.bill_status==='due'?()=>markBillPaid(si):null} onEdit={()=>openEditSold(si)} onReturn={()=>returnToInventory(si)} noteCount={allNotes.filter(n=>n.sold_item_id===si.id&&!n.is_resolved).length}/>);
+          })()}
+        </>;})()}
 
         {/* RETURNS */}
         {tab==='returns'&&<>
