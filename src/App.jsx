@@ -88,11 +88,14 @@ export default function App() {
   const [uploadBusy, setUploadBusy] = useState(false);
   const [returnSearch, setReturnSearch] = useState('');
   const [returnItems, setReturnItems] = useState([]);
-  const [returnReason, setReturnReason] = useState('');
+  const [returnReasons, setReturnReasons] = useState({});
   const [returnPhotos, setReturnPhotos] = useState({});
+  const [savedReturns, setSavedReturns] = useState(() => { try { return JSON.parse(localStorage.getItem('av_returns') || '[]'); } catch { return []; } });
+  const [returnTab, setReturnTab] = useState('new');
+  const [printIncludeInvoice, setPrintIncludeInvoice] = useState(false);
 
   const notify = useCallback((t, m) => { setToast({ t, m }); setTimeout(() => setToast(null), t === 'err' ? 8000 : 4000); }, []);
-  const closeModal = () => { setModal(null); setReceiptHtml(''); setBillHtml(''); setViewInvUrl(null); setInvDetailItems([]); setInvDetailTab('items'); setLcEvents([]); setEmailTo(''); setBillItems([]); setBillSearch(''); setItemNotes([]); setNoteForm({ category: 'product_defect', note: '' }); setSf({ amount: '', platform: '', buyer: '', buyerEmail: '', buyerPhone: '', billStatus: 'paid', includeHst: true, listingUrl: '' }); setExtractBusy(false); setExtractData(null); setInvItemLots({}); setInvPrintSelections({}); setInvPhotoItemId(null); setInvPhotoLot(''); setPhotoPreview(null); setSharePrice(''); setReturnReason(''); };
+  const closeModal = () => { setModal(null); setReceiptHtml(''); setBillHtml(''); setViewInvUrl(null); setInvDetailItems([]); setInvDetailTab('items'); setLcEvents([]); setEmailTo(''); setBillItems([]); setBillSearch(''); setItemNotes([]); setNoteForm({ category: 'product_defect', note: '' }); setSf({ amount: '', platform: '', buyer: '', buyerEmail: '', buyerPhone: '', billStatus: 'paid', includeHst: true, listingUrl: '' }); setExtractBusy(false); setExtractData(null); setInvItemLots({}); setInvPrintSelections({}); setInvPhotoItemId(null); setInvPhotoLot(''); setPhotoPreview(null); setSharePrice(''); setPrintIncludeInvoice(false); };
 
   useEffect(() => {
     const { data: { subscription } } = db.onAuthChange((_, s) => { if (s?.user) { setUser(s.user); setAuth('app'); } else { setUser(null); setAuth('login'); } });
@@ -183,10 +186,47 @@ export default function App() {
     await loadPhotos(itemId); setInvPhotoItemId(null); setInvPhotoLot(''); notify('ok', `${files.length} photo(s) saved`);
   }, [notify, loadPhotos, invPhotoLot, handleUpdateLotNumber]);
 
-  const printInvoiceItems = useCallback((invoice, itemsToPrint) => {
-    const pages = []; for (let i = 0; i < itemsToPrint.length; i += 3) pages.push(itemsToPrint.slice(i, i + 3));
-    const pHTML = pages.map((pg, pi) => `<div class="page${pi > 0 ? ' pb' : ''}"><div class="ph"><div class="hl"></div><h1>${invoice.auction_house || 'Invoice'}</h1><p class="sub">${invoice.invoice_number ? '#' + invoice.invoice_number : ''} ${invoice.date ? '· ' + invoice.date : ''}</p><div class="hl"></div></div><div class="items">${pg.map(item => { const ph = itemPhotos[item.id] || []; const url = ph[0]?.url || null; return `<div class="ic"><div class="ip">${url ? `<img src="${url}"/>` : `<div class="np">No Image</div>`}</div><div class="ii"><h2>${item.title || 'Untitled'}</h2>${item.lot_number ? `<p class="lot">Lot #${item.lot_number}</p>` : ''}</div></div>`; }).join('')}</div><div class="pf"><div class="hl"></div><p class="pn">Page ${pi + 1} of ${pages.length}</p></div></div>`).join('');
-    const html = `<!DOCTYPE html><html><head><meta charset="utf-8"/><title>Print</title><style>@page{size:A4 portrait;margin:0}*{margin:0;padding:0;box-sizing:border-box}body{font-family:-apple-system,'Segoe UI',Arial,sans-serif;background:#fff;color:#1a1a1a;-webkit-print-color-adjust:exact;print-color-adjust:exact}.page{width:210mm;min-height:297mm;padding:15mm 20mm;display:flex;flex-direction:column}.pb{page-break-before:always}.ph{text-align:center;margin-bottom:8mm}.ph h1{font-size:18pt;font-weight:700;margin:3mm 0 1mm}.ph .sub{font-size:10pt;color:#666}.hl{height:1.5px;background:linear-gradient(90deg,transparent,#333 15%,#333 85%,transparent);margin:3mm 0}.items{flex:1;display:flex;flex-direction:column;gap:6mm}.ic{border:1.5px solid #ddd;border-radius:3mm;padding:4mm;display:flex;align-items:center;gap:5mm;min-height:70mm}.ip{width:60mm;height:60mm;flex-shrink:0;border-radius:2mm;overflow:hidden;background:#f5f5f5;display:flex;align-items:center;justify-content:center}.ip img{width:100%;height:100%;object-fit:cover}.np{color:#aaa;font-size:11pt}.ii{flex:1}.ii h2{font-size:14pt;font-weight:700;margin-bottom:2mm;line-height:1.3}.ii .lot{font-size:13pt;color:#444;font-weight:600;padding:2mm 4mm;background:#f0f0f0;border-radius:2mm;display:inline-block;margin-top:2mm}.pf{text-align:center;margin-top:5mm}.pf .pn{font-size:9pt;color:#999}</style></head><body>${pHTML}</body></html>`;
+  const printInvoiceItems = useCallback((invoice, itemsToPrint, detailed = false, includeInvoiceCopy = false) => {
+    const perPage = detailed ? 4 : 3;
+    const pages = []; for (let i = 0; i < itemsToPrint.length; i += perPage) pages.push(itemsToPrint.slice(i, i + perPage));
+    const inv = invoice;
+    const invoiceCopyHtml = includeInvoiceCopy ? `<div class="page"><div class="inv-copy"><h2>Invoice Summary</h2><table><tr><td>Auction House</td><td><b>${inv.auction_house||''}</b></td></tr><tr><td>Invoice #</td><td>${inv.invoice_number||''}</td></tr><tr><td>Date</td><td>${inv.date||''}</td></tr><tr><td>Payment</td><td>${inv.payment_method||''} · ${inv.payment_status||''}</td></tr><tr><td>Location</td><td>${inv.pickup_location||''}</td></tr><tr><td>Items</td><td>${inv.item_count||itemsToPrint.length}</td></tr><tr><td>Lot Total</td><td>$${parseFloat(inv.lot_total||0).toFixed(2)}</td></tr><tr><td>Premium</td><td>$${parseFloat(inv.premium_total||0).toFixed(2)}</td></tr><tr><td>Tax</td><td>$${parseFloat(inv.tax_total||0).toFixed(2)}</td></tr><tr><td><b>Grand Total</b></td><td><b>$${parseFloat(inv.grand_total||0).toFixed(2)}</b></td></tr></table></div></div>` : '';
+    const pHTML = pages.map((pg, pi) => `<div class="page${pi > 0 ? ' pb' : ''}">
+      <div class="hdr"><div class="hl"></div><h1>${inv.auction_house || 'Invoice'}</h1><p class="sub">${inv.invoice_number ? '#' + inv.invoice_number : ''} ${inv.date ? '· ' + inv.date : ''}</p><div class="hl"></div></div>
+      <div class="items">${pg.map(item => {
+        const ph = itemPhotos[item.id] || []; const url = ph[0]?.url || null;
+        if (detailed) {
+          return `<div class="ic det">
+            <div class="ip">${url ? `<img src="${url}"/>` : `<div class="np">No Image</div>`}</div>
+            <div class="ii">
+              <h2>${item.title || 'Untitled'}</h2>
+              <table>
+                <tr><td>Lot #</td><td><b>${item.lot_number || '—'}</b></td></tr>
+                <tr><td>Auction Date</td><td>${item.date || inv.date || '—'}</td></tr>
+                <tr><td>Invoice Date</td><td>${inv.date || '—'}</td></tr>
+                <tr><td>Invoice To</td><td>${inv.auction_house || '—'}</td></tr>
+                <tr><td>Location</td><td>${item.pickup_location || inv.pickup_location || '—'}</td></tr>
+                <tr><td>Hammer</td><td>$${parseFloat(item.hammer_price||0).toFixed(2)}</td></tr>
+                <tr><td>Premium</td><td>$${parseFloat(item.premium_amount||0).toFixed(2)}</td></tr>
+                <tr><td>Tax</td><td>$${parseFloat(item.tax_amount||0).toFixed(2)}</td></tr>
+                <tr><td><b>Total</b></td><td><b>$${parseFloat(item.total_cost||0).toFixed(2)}</b></td></tr>
+              </table>
+            </div>
+          </div>`;
+        } else {
+          return `<div class="ic"><div class="ip">${url ? `<img src="${url}"/>` : `<div class="np">No Image</div>`}</div><div class="ii"><h2>${item.title || 'Untitled'}</h2>${item.lot_number ? `<p class="lot">Lot #${item.lot_number}</p>` : ''}</div></div>`;
+        }
+      }).join('')}</div>
+      <div class="ft"><div class="hl"></div><p class="pn">Page ${pi + 1} of ${pages.length}</p></div>
+    </div>`).join('');
+    const detStyle = detailed ? `
+      .ic.det{flex-direction:row;align-items:flex-start;gap:4mm;min-height:auto;padding:3mm}
+      .det .ip{width:38mm;height:38mm;flex-shrink:0}
+      .det .ii{flex:1}
+      .det .ii h2{font-size:11pt;margin-bottom:1.5mm}
+      .det table{font-size:8.5pt;margin:0}.det td{padding:0.8mm 2mm;border-bottom:0.5px solid #eee}.det td:first-child{width:70px;color:#888}
+      .items{gap:3mm}` : '';
+    const html = `<!DOCTYPE html><html><head><meta charset="utf-8"/><title>Print</title><style>@page{size:A4 portrait;margin:0}*{margin:0;padding:0;box-sizing:border-box}body{font-family:-apple-system,'Segoe UI',Arial,sans-serif;background:#fff;color:#1a1a1a;-webkit-print-color-adjust:exact;print-color-adjust:exact}.page{width:210mm;min-height:297mm;padding:12mm 16mm;display:flex;flex-direction:column}.pb{page-break-before:always}.hdr{text-align:center;margin-bottom:5mm}.hdr h1{font-size:16pt;font-weight:700;margin:2mm 0 1mm}.hdr .sub{font-size:9pt;color:#666}.hl{height:1.5px;background:linear-gradient(90deg,transparent,#333 15%,#333 85%,transparent);margin:2mm 0}.items{flex:1;display:flex;flex-direction:column;gap:5mm}.ic{border:1.5px solid #ddd;border-radius:3mm;padding:4mm;display:flex;align-items:center;gap:5mm;min-height:60mm}.ip{width:50mm;height:50mm;flex-shrink:0;border-radius:2mm;overflow:hidden;background:#f5f5f5;display:flex;align-items:center;justify-content:center}.ip img{width:100%;height:100%;object-fit:cover}.np{color:#aaa;font-size:10pt}.ii{flex:1}.ii h2{font-size:13pt;font-weight:700;margin-bottom:2mm;line-height:1.3}.ii .lot{font-size:12pt;color:#444;font-weight:600;padding:1.5mm 3mm;background:#f0f0f0;border-radius:2mm;display:inline-block;margin-top:1mm}.ft{text-align:center;margin-top:3mm}.ft .pn{font-size:8pt;color:#999}.inv-copy{border:2px solid #333;border-radius:4mm;padding:20mm;margin:30mm 16mm}.inv-copy h2{font-size:18pt;margin-bottom:6mm;text-align:center}.inv-copy table{width:100%;font-size:12pt;border-collapse:collapse}.inv-copy td{padding:3mm 4mm;border-bottom:1px solid #ddd}.inv-copy td:first-child{width:140px;color:#666}${detStyle}</style></head><body>${invoiceCopyHtml}${pHTML}</body></html>`;
     const w = window.open('', '_blank', 'width=800,height=1000'); w.document.write(html); w.document.close(); setTimeout(() => { w.focus(); w.print(); }, 600);
   }, [itemPhotos]);
 
@@ -281,15 +321,36 @@ export default function App() {
   // Returns
   const searchReturnable = () => { if (!returnSearch.trim()) return []; const q = returnSearch.toLowerCase(); return [...items.filter(i => [i.title, i.lot_number, i.auction_house].some(f => f?.toLowerCase?.().includes(q))).map(i => ({ ...i, _src: 'item' })), ...sold.filter(i => [i.title, i.lot_number, i.receipt_number].some(f => f?.toLowerCase?.().includes(q))).map(i => ({ ...i, _src: 'sold' }))]; };
   const addToReturn = useCallback(async (item) => { if (returnItems.find(r => r.id === item.id)) { notify('err', 'Already added'); return; } await loadPhotos(item.id); setReturnItems(prev => [...prev, item]); notify('ok', `Added: ${item.title}`); }, [returnItems, notify, loadPhotos]);
-  const removeFromReturn = (id) => setReturnItems(prev => prev.filter(r => r.id !== id));
+  const removeFromReturn = (id) => { setReturnItems(prev => prev.filter(r => r.id !== id)); setReturnReasons(prev => { const n = { ...prev }; delete n[id]; return n; }); setReturnPhotos(prev => { const n = { ...prev }; delete n[id]; return n; }); };
   const handleReturnPhoto = useCallback(async (itemId, e) => { const files = Array.from(e.target.files || []); if (!files.length) return; const urls = files.map(f => ({ id: 'rp_' + Date.now() + Math.random(), url: URL.createObjectURL(f), file_name: f.name, isReturn: true })); setReturnPhotos(prev => ({ ...prev, [itemId]: [...(prev[itemId] || []), ...urls] })); notify('ok', `${files.length} return photo(s) added`); }, [notify]);
-  const generateReturnPDF = useCallback(() => {
+  const saveReturnRequest = useCallback(() => {
     if (!returnItems.length) return;
-    const ihtml = returnItems.map(item => { const op = (itemPhotos[item.id] || []).filter(p => p.url); const rp = (returnPhotos[item.id] || []).filter(p => p.url); const inv = getItemInvoice(item);
-      return `<div class="item"><h2>${item.title}</h2><table><tr><td><b>Lot #</b></td><td>${item.lot_number || '—'}</td></tr><tr><td><b>Invoice #</b></td><td>${inv?.invoice_number || '—'}</td></tr><tr><td><b>Vendor</b></td><td>${item.auction_house || '—'}</td></tr><tr><td><b>Date</b></td><td>${item.date || '—'}</td></tr><tr><td><b>Location</b></td><td>${item.pickup_location || inv?.pickup_location || '—'}</td></tr><tr><td><b>Hammer</b></td><td>$${parseFloat(item.hammer_price||0).toFixed(2)}</td></tr><tr><td><b>Premium</b></td><td>$${parseFloat(item.premium_amount||0).toFixed(2)}</td></tr><tr><td><b>Tax</b></td><td>$${parseFloat(item.tax_amount||0).toFixed(2)}</td></tr><tr><td><b>Total</b></td><td><b>$${parseFloat(item.total_cost||0).toFixed(2)}</b></td></tr></table>${returnReason ? `<div class="reason"><b>Reason:</b> ${returnReason}</div>` : ''}${op.length > 0 ? `<p class="pl">Original Photos (${op.length})</p><div class="photos">${op.map(p => `<img src="${p.url}"/>`).join('')}</div>` : ''}${rp.length > 0 ? `<p class="pl" style="color:#DC2626">Return Photos (${rp.length})</p><div class="photos">${rp.map(p => `<img src="${p.url}"/>`).join('')}</div>` : ''}</div>`; }).join('');
-    const html = `<!DOCTYPE html><html><head><meta charset="utf-8"/><title>Return Report</title><style>@page{size:A4 portrait;margin:15mm}*{margin:0;padding:0;box-sizing:border-box}body{font-family:-apple-system,Arial,sans-serif;color:#1a1a1a;-webkit-print-color-adjust:exact;print-color-adjust:exact}h1{font-size:20pt;text-align:center;margin-bottom:4mm;padding-bottom:3mm;border-bottom:2px solid #333}.meta{text-align:center;color:#666;font-size:10pt;margin-bottom:8mm}.item{border:1.5px solid #ddd;border-radius:4mm;padding:5mm;margin-bottom:6mm;page-break-inside:avoid}.item h2{font-size:14pt;margin-bottom:3mm}table{width:100%;font-size:11pt;border-collapse:collapse;margin-bottom:3mm}td{padding:2mm 3mm;border-bottom:1px solid #eee}td:first-child{width:120px;color:#666}.reason{background:#FFF7ED;border:1px solid #FB923C;border-radius:2mm;padding:3mm;margin:3mm 0;font-size:11pt}.pl{font-size:10pt;font-weight:600;margin:3mm 0 2mm}.photos{display:flex;gap:3mm;flex-wrap:wrap}.photos img{width:45mm;height:45mm;object-fit:cover;border-radius:2mm;border:1px solid #ddd}</style></head><body><h1>Return Report</h1><p class="meta">${returnItems.length} item(s) · ${new Date().toLocaleDateString('en-CA')}</p>${ihtml}</body></html>`;
+    const cluster = { id: uid(), date: new Date().toISOString(), items: returnItems.map(item => ({ id: item.id, title: item.title, lot_number: item.lot_number, auction_house: item.auction_house, invoice_id: item.invoice_id, hammer_price: item.hammer_price, premium_amount: item.premium_amount, tax_amount: item.tax_amount, total_cost: item.total_cost, date: item.date, pickup_location: item.pickup_location, reason: returnReasons[item.id] || '', returnPhotoCount: (returnPhotos[item.id] || []).length })) };
+    const updated = [cluster, ...savedReturns];
+    setSavedReturns(updated);
+    try { localStorage.setItem('av_returns', JSON.stringify(updated)); } catch {}
+    setReturnItems([]); setReturnReasons({}); setReturnPhotos({});
+    notify('ok', `✅ Return request saved (${cluster.items.length} items)`);
+  }, [returnItems, returnReasons, returnPhotos, savedReturns, notify]);
+  const deleteReturnRequest = (id) => { if (!confirm('Delete this saved return?')) return; const updated = savedReturns.filter(r => r.id !== id); setSavedReturns(updated); try { localStorage.setItem('av_returns', JSON.stringify(updated)); } catch {} notify('ok', 'Deleted'); };
+
+  const generateReturnPDF = useCallback((detailed = true, includeInvoiceCopy = false) => {
+    if (!returnItems.length) return;
+    const invoiceCopyHtml = includeInvoiceCopy ? (() => {
+      const invIds = [...new Set(returnItems.map(i => i.invoice_id).filter(Boolean))];
+      return invIds.map(invId => { const inv = invoices.find(i => i.id === invId); if (!inv) return ''; return `<div class="page pb"><div class="inv-copy"><h2>Invoice Copy</h2><table><tr><td>Auction House</td><td><b>${inv.auction_house||''}</b></td></tr><tr><td>Invoice #</td><td>${inv.invoice_number||''}</td></tr><tr><td>Date</td><td>${inv.date||''}</td></tr><tr><td>Payment</td><td>${inv.payment_method||''} · ${inv.payment_status||''}</td></tr><tr><td>Location</td><td>${inv.pickup_location||''}</td></tr><tr><td>Lot Total</td><td>$${parseFloat(inv.lot_total||0).toFixed(2)}</td></tr><tr><td>Premium</td><td>$${parseFloat(inv.premium_total||0).toFixed(2)}</td></tr><tr><td>Tax</td><td>$${parseFloat(inv.tax_total||0).toFixed(2)}</td></tr><tr><td><b>Grand Total</b></td><td><b>$${parseFloat(inv.grand_total||0).toFixed(2)}</b></td></tr></table></div></div>`; }).join('');
+    })() : '';
+    if (!detailed) {
+      const perPage = 4; const pages = []; for (let i = 0; i < returnItems.length; i += perPage) pages.push(returnItems.slice(i, i + perPage));
+      const pHTML = pages.map((pg, pi) => `<div class="page${pi > 0 ? ' pb' : ''}"><div class="hdr"><div class="hl"></div><h1>Return Report</h1><p class="sub">${returnItems.length} item(s) · ${new Date().toLocaleDateString('en-CA')}</p><div class="hl"></div></div><div class="items">${pg.map(item => { const ph = itemPhotos[item.id] || []; const url = ph[0]?.url || null; const reason = returnReasons[item.id] || ''; return `<div class="ic"><div class="ip">${url ? `<img src="${url}"/>` : `<div class="np">No Image</div>`}</div><div class="ii"><h2>${item.title || 'Untitled'}</h2>${item.lot_number ? `<p class="lot">Lot #${item.lot_number}</p>` : ''}${reason ? `<p class="rsn">Reason: ${reason}</p>` : ''}</div></div>`; }).join('')}</div><div class="ft"><div class="hl"></div><p class="pn">Page ${pi + 1} of ${pages.length}</p></div></div>`).join('');
+      const html = `<!DOCTYPE html><html><head><meta charset="utf-8"/><title>Return Report</title><style>@page{size:A4 portrait;margin:0}*{margin:0;padding:0;box-sizing:border-box}body{font-family:-apple-system,Arial,sans-serif;background:#fff;color:#1a1a1a;-webkit-print-color-adjust:exact;print-color-adjust:exact}.page{width:210mm;min-height:297mm;padding:12mm 16mm;display:flex;flex-direction:column}.pb{page-break-before:always}.hdr{text-align:center;margin-bottom:5mm}.hdr h1{font-size:16pt;font-weight:700;margin:2mm 0 1mm}.hdr .sub{font-size:9pt;color:#666}.hl{height:1.5px;background:linear-gradient(90deg,transparent,#333 15%,#333 85%,transparent);margin:2mm 0}.items{flex:1;display:flex;flex-direction:column;gap:3mm}.ic{border:1.5px solid #ddd;border-radius:3mm;padding:3mm;display:flex;align-items:center;gap:4mm;min-height:50mm}.ip{width:42mm;height:42mm;flex-shrink:0;border-radius:2mm;overflow:hidden;background:#f5f5f5;display:flex;align-items:center;justify-content:center}.ip img{width:100%;height:100%;object-fit:cover}.np{color:#aaa;font-size:9pt}.ii{flex:1}.ii h2{font-size:12pt;font-weight:700;margin-bottom:1mm;line-height:1.3}.ii .lot{font-size:10pt;color:#444;font-weight:600;padding:1mm 3mm;background:#f0f0f0;border-radius:2mm;display:inline-block}.ii .rsn{font-size:9pt;color:#C2410C;margin-top:1.5mm;font-style:italic}.ft{text-align:center;margin-top:3mm}.ft .pn{font-size:8pt;color:#999}.inv-copy{border:2px solid #333;border-radius:4mm;padding:8mm;margin:20mm}.inv-copy h2{font-size:16pt;margin-bottom:4mm}.inv-copy table{width:100%;font-size:11pt;border-collapse:collapse}.inv-copy td{padding:2mm 3mm;border-bottom:1px solid #eee}.inv-copy td:first-child{width:130px;color:#666}</style></head><body>${invoiceCopyHtml}${pHTML}</body></html>`;
+      const w = window.open('', '_blank', 'width=800,height=1000'); w.document.write(html); w.document.close(); setTimeout(() => { w.focus(); w.print(); }, 600); return;
+    }
+    const ihtml = returnItems.map(item => { const op = (itemPhotos[item.id] || []).filter(p => p.url); const rp = (returnPhotos[item.id] || []).filter(p => p.url); const inv = getItemInvoice(item); const reason = returnReasons[item.id] || '';
+      return `<div class="item"><h2>${item.title}</h2><table><tr><td><b>Lot #</b></td><td>${item.lot_number || '—'}</td></tr><tr><td><b>Invoice #</b></td><td>${inv?.invoice_number || '—'}</td></tr><tr><td><b>Vendor</b></td><td>${item.auction_house || '—'}</td></tr><tr><td><b>Date</b></td><td>${item.date || '—'}</td></tr><tr><td><b>Location</b></td><td>${item.pickup_location || inv?.pickup_location || '—'}</td></tr><tr><td><b>Hammer</b></td><td>$${parseFloat(item.hammer_price||0).toFixed(2)}</td></tr><tr><td><b>Premium</b></td><td>$${parseFloat(item.premium_amount||0).toFixed(2)}</td></tr><tr><td><b>Tax</b></td><td>$${parseFloat(item.tax_amount||0).toFixed(2)}</td></tr><tr><td><b>Total</b></td><td><b>$${parseFloat(item.total_cost||0).toFixed(2)}</b></td></tr></table>${reason ? `<div class="reason"><b>Reason:</b> ${reason}</div>` : ''}${op.length > 0 ? `<p class="pl">Original Photos (${op.length})</p><div class="photos">${op.map(p => `<img src="${p.url}"/>`).join('')}</div>` : ''}${rp.length > 0 ? `<p class="pl" style="color:#DC2626">Return Photos (${rp.length})</p><div class="photos">${rp.map(p => `<img src="${p.url}"/>`).join('')}</div>` : ''}</div>`; }).join('');
+    const html = `<!DOCTYPE html><html><head><meta charset="utf-8"/><title>Return Report</title><style>@page{size:A4 portrait;margin:15mm}*{margin:0;padding:0;box-sizing:border-box}body{font-family:-apple-system,Arial,sans-serif;color:#1a1a1a;-webkit-print-color-adjust:exact;print-color-adjust:exact}h1{font-size:20pt;text-align:center;margin-bottom:4mm;padding-bottom:3mm;border-bottom:2px solid #333}.meta{text-align:center;color:#666;font-size:10pt;margin-bottom:8mm}.item{border:1.5px solid #ddd;border-radius:4mm;padding:5mm;margin-bottom:6mm;page-break-inside:avoid}.item h2{font-size:14pt;margin-bottom:3mm}table{width:100%;font-size:11pt;border-collapse:collapse;margin-bottom:3mm}td{padding:2mm 3mm;border-bottom:1px solid #eee}td:first-child{width:120px;color:#666}.reason{background:#FFF7ED;border:1px solid #FB923C;border-radius:2mm;padding:3mm;margin:3mm 0;font-size:11pt}.pl{font-size:10pt;font-weight:600;margin:3mm 0 2mm}.photos{display:flex;gap:3mm;flex-wrap:wrap}.photos img{width:45mm;height:45mm;object-fit:cover;border-radius:2mm;border:1px solid #ddd}.inv-copy{border:2px solid #333;border-radius:4mm;padding:8mm;margin-bottom:8mm;page-break-after:always}.inv-copy h2{font-size:16pt;margin-bottom:4mm}.inv-copy table{width:100%;font-size:11pt;border-collapse:collapse}.inv-copy td{padding:2mm 3mm;border-bottom:1px solid #eee}.inv-copy td:first-child{width:130px;color:#666}</style></head><body>${invoiceCopyHtml}<h1>Return Report</h1><p class="meta">${returnItems.length} item(s) · ${new Date().toLocaleDateString('en-CA')}</p>${ihtml}</body></html>`;
     const w = window.open('', '_blank', 'width=800,height=1000'); w.document.write(html); w.document.close(); setTimeout(() => { w.focus(); w.print(); }, 600);
-  }, [returnItems, returnReason, itemPhotos, returnPhotos, getItemInvoice]);
+  }, [returnItems, returnReasons, itemPhotos, returnPhotos, getItemInvoice, invoices]);
   const noteItemName = (note) => { if (note.item_id) { const it = items.find(i => i.id === note.item_id); return it ? it.title : 'Unknown'; } if (note.sold_item_id) { const si = sold.find(i => i.id === note.sold_item_id); return si ? si.title : 'Sold item'; } return 'Unknown'; };
 
   // ═══ RENDER ═══
@@ -463,31 +524,28 @@ export default function App() {
 
         {/* RETURNS */}
         {tab==='returns'&&<>
-          <div style={S.hdr}><h1 style={{fontSize:24,fontWeight:800}}>Returns</h1><p style={{fontSize:13,color:'var(--text-muted)'}}>Search items by lot #, invoice #, or name to add to return</p></div>
+          <div style={S.hdr}><h1 style={{fontSize:24,fontWeight:800}}>Returns</h1><p style={{fontSize:13,color:'var(--text-muted)'}}>{savedReturns.length} saved · {returnItems.length} pending</p></div>
 
-          {/* Search */}
-          <input style={{...S.inp,marginBottom:8}} placeholder="Search lot #, invoice #, item name..." value={returnSearch} onChange={e=>setReturnSearch(e.target.value)}/>
+          {/* Sub-tabs: New / Saved */}
+          <div style={S.pills}>
+            <button style={{...S.pill,...(returnTab==='new'?S.pillOn:{})}} onClick={()=>setReturnTab('new')}>+ New Return</button>
+            <button style={{...S.pill,...(returnTab==='saved'?S.pillOn:{})}} onClick={()=>setReturnTab('saved')}>📁 Saved ({savedReturns.length})</button>
+          </div>
 
-          {/* Search results */}
-          {returnSearch.trim()&&<div style={{maxHeight:200,overflow:'auto',border:'1px solid var(--border)',borderRadius:12,marginBottom:14}}>
-            {searchReturnable().length===0?<p style={{padding:16,textAlign:'center',color:'var(--text-muted)',fontSize:13}}>No items found</p>:searchReturnable().map(item=><div key={item.id+item._src} style={{display:'flex',gap:10,padding:'10px 14px',borderBottom:'1px solid var(--border-light)',alignItems:'center',cursor:'pointer'}} onClick={()=>{addToReturn(item);setReturnSearch('');}}>
-              <div style={{flex:1,minWidth:0}}><p style={{fontSize:13,fontWeight:600,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{item.title}</p><p style={{fontSize:11,color:'var(--text-muted)'}}>Lot #{item.lot_number||'—'} · {item.auction_house} · {fmt(item.total_cost)}</p></div>
-              <span style={{fontSize:10,padding:'2px 6px',borderRadius:4,background:item._src==='sold'?'var(--green-light)':'var(--accent-light)',color:item._src==='sold'?'var(--green)':'var(--accent)',fontWeight:600}}>{item._src==='sold'?'Sold':'Stock'}</span>
-              <span style={{color:'var(--accent)',fontWeight:700,fontSize:20}}>+</span>
-            </div>)}
-          </div>}
+          {/* NEW RETURN TAB */}
+          {returnTab==='new'&&<>
+            <input style={{...S.inp,marginBottom:8}} placeholder="Search lot #, invoice #, item name..." value={returnSearch} onChange={e=>setReturnSearch(e.target.value)}/>
+            {returnSearch.trim()&&<div style={{maxHeight:200,overflow:'auto',border:'1px solid var(--border)',borderRadius:12,marginBottom:14}}>
+              {searchReturnable().length===0?<p style={{padding:16,textAlign:'center',color:'var(--text-muted)',fontSize:13}}>No items found</p>:searchReturnable().map(item=><div key={item.id+item._src} style={{display:'flex',gap:10,padding:'10px 14px',borderBottom:'1px solid var(--border-light)',alignItems:'center',cursor:'pointer'}} onClick={()=>{addToReturn(item);setReturnSearch('');}}>
+                <div style={{flex:1,minWidth:0}}><p style={{fontSize:13,fontWeight:600,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{item.title}</p><p style={{fontSize:11,color:'var(--text-muted)'}}>Lot #{item.lot_number||'—'} · {item.auction_house} · {fmt(item.total_cost)}</p></div>
+                <span style={{fontSize:10,padding:'2px 6px',borderRadius:4,background:item._src==='sold'?'var(--green-light)':'var(--accent-light)',color:item._src==='sold'?'var(--green)':'var(--accent)',fontWeight:600}}>{item._src==='sold'?'Sold':'Stock'}</span>
+                <span style={{color:'var(--accent)',fontWeight:700,fontSize:20}}>+</span>
+              </div>)}
+            </div>}
 
-          {/* Return reason */}
-          {returnItems.length>0&&<div style={{marginBottom:12}}>
-            <label style={S.label}>Return Reason</label>
-            <textarea style={{...S.inp,minHeight:50,resize:'vertical'}} placeholder="Describe the reason for return..." value={returnReason} onChange={e=>setReturnReason(e.target.value)}/>
-          </div>}
-
-          {/* Selected return items */}
-          {returnItems.length===0?<Empty text="Search and add items for return"/>:
-            <>
+            {returnItems.length===0?<Empty text="Search and add items for return"/>:<>
               <p style={S.secT}>Return Items ({returnItems.length})</p>
-              {returnItems.map((item,i)=>{const ph=itemPhotos[item.id]||[];const rp=returnPhotos[item.id]||[];const inv=getItemInvoice(item);return<div key={item.id} className="fade-up" style={{...S.card,marginBottom:10,animationDelay:`${i*20}ms`,borderLeft:'3px solid #C2410C'}}>
+              {returnItems.map((item,i)=>{const ph=itemPhotos[item.id]||[];const rp=returnPhotos[item.id]||[];const inv=getItemInvoice(item);const reason=returnReasons[item.id]||'';return<div key={item.id} className="fade-up" style={{...S.card,marginBottom:10,animationDelay:`${i*20}ms`,borderLeft:'3px solid #C2410C'}}>
                 <div style={{padding:'12px 14px'}}>
                   <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',marginBottom:6}}>
                     <div><p style={{fontSize:15,fontWeight:700}}>{item.title}</p><p style={{fontSize:12,color:'var(--text-muted)'}}>Lot #{item.lot_number||'—'} · Invoice #{inv?.invoice_number||'—'} · {item.auction_house}</p></div>
@@ -498,6 +556,8 @@ export default function App() {
                     <span style={{fontSize:11,padding:'2px 8px',borderRadius:6,background:'var(--bg-surface)'}}>Tax: {fmt(item.tax_amount)}</span>
                     <span style={{fontSize:11,padding:'2px 8px',borderRadius:6,background:'var(--accent-light)',color:'var(--accent)',fontWeight:700}}>Total: {fmt(item.total_cost)}</span>
                   </div>
+                  {/* Per-item reason */}
+                  <textarea style={{...S.inp,minHeight:40,resize:'vertical',fontSize:13,marginBottom:8,borderColor:reason?'var(--green)':'var(--border)'}} placeholder="Reason for return (this item)..." value={reason} onChange={e=>setReturnReasons(prev=>({...prev,[item.id]:e.target.value}))}/>
                   {/* Original photos */}
                   {ph.length>0&&<><p style={{fontSize:11,fontWeight:600,color:'var(--text-muted)',marginBottom:4}}>Original Photos ({ph.length})</p><div style={{display:'flex',gap:4,overflowX:'auto',marginBottom:8}}>{ph.filter(p=>p.url).map((p,pi)=><img key={p.id||pi} src={p.url} alt="" style={{width:52,height:52,borderRadius:8,objectFit:'cover',flexShrink:0,border:'1px solid var(--border-light)'}}/>)}</div></>}
                   {/* Return photos */}
@@ -507,13 +567,41 @@ export default function App() {
                 </div>
               </div>;})}
 
-              {/* Actions */}
-              <div style={{display:'flex',flexDirection:'column',gap:8,marginTop:12}}>
-                <button style={{...S.btn1,width:'100%',background:'#C2410C'}} onClick={generateReturnPDF}>🖨 Generate Return PDF ({returnItems.length} items)</button>
-                <button style={{...S.btn2,width:'100%'}} onClick={()=>{if(confirm('Clear all return items?')){setReturnItems([]);setReturnPhotos({});setReturnReason('');}}}>🗑 Clear All</button>
+              {/* Invoice copy toggle */}
+              <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',padding:'10px 14px',background:'var(--bg-surface)',borderRadius:10,marginBottom:10}}>
+                <div><p style={{fontSize:13,fontWeight:600}}>📄 Include Invoice Copy</p><p style={{fontSize:11,color:'var(--text-muted)'}}>Adds invoice page on top of PDF</p></div>
+                <button onClick={()=>setPrintIncludeInvoice(!printIncludeInvoice)} style={{width:48,height:28,borderRadius:14,border:'none',background:printIncludeInvoice?'var(--green)':'var(--border)',position:'relative',cursor:'pointer',transition:'background .2s'}}><div style={{width:22,height:22,borderRadius:11,background:'#fff',position:'absolute',top:3,left:printIncludeInvoice?23:3,transition:'left .2s',boxShadow:'0 1px 3px rgba(0,0,0,.2)'}}/></button>
               </div>
-            </>
-          }
+
+              {/* Actions */}
+              <div style={{display:'flex',flexDirection:'column',gap:8,marginTop:8}}>
+                <button style={{...S.btn1,width:'100%',background:'var(--green)'}} onClick={()=>{if(!returnItems.every(i=>returnReasons[i.id]?.trim())){if(!confirm('Some items have no reason entered. Save anyway?'))return;}saveReturnRequest();}}>💾 Save Return Request</button>
+                <button style={{...S.btn1,width:'100%',background:'#C2410C'}} onClick={()=>generateReturnPDF(true,printIncludeInvoice)}>🖨 Print With Details</button>
+                <button style={{...S.btn2,width:'100%'}} onClick={()=>generateReturnPDF(false,printIncludeInvoice)}>🖨 Print Without Details (4/page)</button>
+                <button style={{...S.btn2,width:'100%',color:'var(--red)'}} onClick={()=>{if(confirm('Clear all?')){setReturnItems([]);setReturnPhotos({});setReturnReasons({});}}}>🗑 Clear All</button>
+              </div>
+            </>}
+          </>}
+
+          {/* SAVED RETURNS TAB */}
+          {returnTab==='saved'&&<>
+            {savedReturns.length===0?<Empty text="No saved return requests"/>:savedReturns.map((cluster,ci)=><div key={cluster.id} className="fade-up" style={{...S.card,marginBottom:10,animationDelay:`${ci*20}ms`,borderLeft:'3px solid #C2410C'}}>
+              <div style={{padding:'14px 16px'}}>
+                <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',marginBottom:8}}>
+                  <div><p style={{fontSize:14,fontWeight:700}}>Return #{ci+1} — {cluster.items.length} item{cluster.items.length>1?'s':''}</p><p style={{fontSize:12,color:'var(--text-muted)'}}>{fmtDate(cluster.date)}</p></div>
+                  <button style={{...S.chip,color:'var(--red)',fontSize:11}} onClick={()=>deleteReturnRequest(cluster.id)}>🗑</button>
+                </div>
+                <div style={{display:'flex',gap:6,flexWrap:'wrap',marginBottom:6}}>
+                  <span style={{fontSize:12,fontWeight:700,color:'var(--accent)'}}>{fmt(cluster.items.reduce((s,i)=>s+parseFloat(i.total_cost||0),0))} total</span>
+                </div>
+                {cluster.items.map((item,ii)=><div key={item.id+ii} style={{padding:'8px 0',borderTop:'1px solid var(--border-light)'}}>
+                  <p style={{fontSize:13,fontWeight:600}}>{item.title}</p>
+                  <p style={{fontSize:11,color:'var(--text-muted)'}}>Lot #{item.lot_number||'—'} · {item.auction_house} · {fmt(item.total_cost)}</p>
+                  {item.reason&&<p style={{fontSize:12,color:'#C2410C',fontStyle:'italic',marginTop:2}}>Reason: {item.reason}</p>}
+                </div>)}
+              </div>
+            </div>)}
+          </>}
         </>}
 
         {/* ACCOUNT + ISSUES merged */}
@@ -621,7 +709,12 @@ export default function App() {
         </div>;})}</>)}
 
         {invDetailTab==='print'&&(invDetailItems.length===0?<div style={{padding:30,textAlign:'center'}}><div style={S.spin}/></div>:<>
-          <p style={{fontSize:12,color:'var(--text-muted)',marginBottom:8}}>Select items for PDF. 3 per page, portrait.</p>
+          <p style={{fontSize:12,color:'var(--text-muted)',marginBottom:8}}>Select items. "With Details" = 4 per page with full info. "Without" = 3 per page, photo+name+lot only.</p>
+          {/* Invoice copy toggle */}
+          <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',padding:'10px 14px',background:'var(--bg-surface)',borderRadius:10,marginBottom:10}}>
+            <div><p style={{fontSize:13,fontWeight:600}}>📄 Include Invoice Copy</p><p style={{fontSize:11,color:'var(--text-muted)'}}>Adds invoice summary page on top</p></div>
+            <button onClick={()=>setPrintIncludeInvoice(!printIncludeInvoice)} style={{width:48,height:28,borderRadius:14,border:'none',background:printIncludeInvoice?'var(--green)':'var(--border)',position:'relative',cursor:'pointer',transition:'background .2s'}}><div style={{width:22,height:22,borderRadius:11,background:'#fff',position:'absolute',top:3,left:printIncludeInvoice?23:3,transition:'left .2s',boxShadow:'0 1px 3px rgba(0,0,0,.2)'}}/></button>
+          </div>
           <div style={{display:'flex',gap:8,marginBottom:12}}><button style={{...S.chip,fontWeight:600}} onClick={()=>{const a={};invDetailItems.forEach(it=>{a[it.id]=true;});setInvPrintSelections(a);}}>☑ All</button><button style={S.chip} onClick={()=>setInvPrintSelections({})}>☐ None</button></div>
           {invDetailItems.map(it=>{const ph=itemPhotos[it.id]||[];const on=!!invPrintSelections[it.id];return<div key={it.id} style={{display:'flex',gap:10,alignItems:'center',padding:'10px 0',borderBottom:'1px solid var(--border-light)',cursor:'pointer'}} onClick={()=>setInvPrintSelections(p=>({...p,[it.id]:!p[it.id]}))}>
             <div style={{width:24,height:24,borderRadius:7,border:on?'2px solid var(--accent)':'2px solid var(--border)',background:on?'var(--accent)':'transparent',display:'flex',alignItems:'center',justifyContent:'center',flexShrink:0}}>{on&&<span style={{color:'#fff',fontSize:14,fontWeight:700}}>✓</span>}</div>
@@ -630,8 +723,12 @@ export default function App() {
             {!ph[0]?.url&&<span style={{fontSize:10,color:'var(--red)',background:'var(--red-light)',padding:'2px 6px',borderRadius:4}}>No photo</span>}
           </div>;})}
           <div style={{marginTop:16,display:'flex',flexDirection:'column',gap:8}}>
-            {(()=>{const n=Object.values(invPrintSelections).filter(Boolean).length;return n>0&&<button style={{...S.btn1,width:'100%'}} onClick={()=>printInvoiceItems(modal.data,invDetailItems.filter(it=>invPrintSelections[it.id]))}>🖨 Print {n} Selected</button>;})()}
-            <button style={{...S.btn2,width:'100%'}} onClick={()=>printInvoiceItems(modal.data,invDetailItems)}>🖨 Print All ({invDetailItems.length})</button>
+            {(()=>{const n=Object.values(invPrintSelections).filter(Boolean).length; const sel=invDetailItems.filter(it=>invPrintSelections[it.id]); return n>0&&<>
+              <button style={{...S.btn1,width:'100%'}} onClick={()=>printInvoiceItems(modal.data,sel,true,printIncludeInvoice)}>🖨 Print {n} With Details (4/page)</button>
+              <button style={{...S.btn2,width:'100%'}} onClick={()=>printInvoiceItems(modal.data,sel,false,printIncludeInvoice)}>🖨 Print {n} Without Details (3/page)</button>
+            </>;})()}
+            <button style={{...S.btn2,width:'100%',borderStyle:'dashed'}} onClick={()=>printInvoiceItems(modal.data,invDetailItems,true,printIncludeInvoice)}>🖨 All With Details ({invDetailItems.length})</button>
+            <button style={{...S.btn2,width:'100%',borderStyle:'dashed'}} onClick={()=>printInvoiceItems(modal.data,invDetailItems,false,printIncludeInvoice)}>🖨 All Without Details ({invDetailItems.length})</button>
           </div>
         </>)}
 
