@@ -6,8 +6,6 @@
   directory = "netlify/functions"
   node_bundler = "esbuild"
 
-# Extend function timeout to max (26s free tier, 60s Pro)
-# Large PDFs with Claude API need 15-30 seconds
 [functions."parse-invoice"]
   external_node_modules = []
   timeout = 26
@@ -23,6 +21,15 @@
 [functions."extract-listing"]
   external_node_modules = []
   timeout = 26
+
+[functions."public-store"]
+  external_node_modules = ["@supabase/supabase-js"]
+  timeout = 26
+
+[[redirects]]
+  from = "/store"
+  to = "/store.html"
+  status = 200
 
 [[redirects]]
   from = "/api/*"
