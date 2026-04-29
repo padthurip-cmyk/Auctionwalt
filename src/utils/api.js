@@ -11,7 +11,6 @@ export async function parseInvoiceAI(base64, fileType) {
   } catch (err) { clearTimeout(timeout); if (err.name === 'AbortError') throw new Error('Invoice took too long. Try uploading pages separately.'); throw err; }
 }
 
-// Parse a single page — used for multi-page uploads
 export async function parseInvoicePageAI(base64, fileType, mode, pageNumber) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 90000);
