@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import * as db from './utils/db';
-import { parseInvoiceAI, generateReceiptAI, generateBillAI, extractListing, sendEmailFallback } from './utils/api';
+import { parseInvoiceAI, parseInvoicePageAI, generateReceiptAI, generateBillAI, extractListing, sendEmailFallback } from './utils/api';
 import { uid, fmt, fmtDate, fmtTs, readFileAsBase64, openWhatsApp, openSMS, printHTML, buildReceiptText } from './utils/helpers';
 
 const TABS = [
@@ -94,6 +94,7 @@ export default function App() {
   const [returnTab, setReturnTab] = useState('new');
   const [printIncludeInvoice, setPrintIncludeInvoice] = useState(false);
   const [quickSellData, setQuickSellData] = useState({ price: '', payMethod: 'cash', deliveryCharge: '' });
+  const [listStoreData, setListStoreData] = useState({ price: '', description: '' });
 
   const notify = useCallback((t, m) => { setToast({ t, m }); setTimeout(() => setToast(null), t === 'err' ? 8000 : 4000); }, []);
   const closeModal = () => { setModal(null); setReceiptHtml(''); setBillHtml(''); setViewInvUrl(null); setInvDetailItems([]); setInvDetailTab('items'); setLcEvents([]); setEmailTo(''); setBillItems([]); setBillSearch(''); setItemNotes([]); setNoteForm({ category: 'product_defect', note: '' }); setSf({ amount: '', platform: '', buyer: '', buyerEmail: '', buyerPhone: '', billStatus: 'paid', includeHst: true, listingUrl: '' }); setExtractBusy(false); setExtractData(null); setInvItemLots({}); setInvPrintSelections({}); setInvPhotoItemId(null); setInvPhotoLot(''); setPhotoPreview(null); setSharePrice(''); setPrintIncludeInvoice(false); };
@@ -125,57 +126,76 @@ export default function App() {
     const files = Array.from(e.target.files || []); if (!files.length) return;
     setUploadBusy(true);
     try {
-      // Read all files as base64
       const pages = [];
       for (const file of files) {
         const b64 = await readFileAsBase64(file);
         pages.push({ base64: b64, fileType: file.type, fileName: file.name });
       }
       let result;
-      try {
-        if (pages.length === 1) {
+      let allItems = [];
+
+      if (pages.length === 1) {
+        try {
           result = await parseInvoiceAI(pages[0].base64, pages[0].fileType);
-        } else {
-          result = await parseInvoiceAI(null, null, pages);
+        } catch (apiErr) {
+          setUploadBusy(false);
+          if (fileRef.current) fileRef.current.value = '';
+          const msg = apiErr.message || 'Unknown error';
+          if (msg.includes('truncated') || msg.includes('too large')) {
+            notify('err', 'Invoice too large. Try taking a photo of each page and selecting all images together.');
+          } else { notify('err', `Upload failed: ${msg}`); }
+          return;
         }
-      } catch (apiErr) {
-        setUploadBusy(false);
-        if (fileRef.current) fileRef.current.value = '';
-        const msg = apiErr.message || 'Unknown error';
-        if (msg.includes('AbortError') || msg.includes('too long') || msg.includes('timed out')) {
-          notify('err', 'Invoice analysis timed out. Try fewer/smaller images.');
-        } else if (msg.includes('Failed to fetch') || msg.includes('NetworkError') || msg.includes('502') || msg.includes('503')) {
-          notify('err', 'Server timed out. Try fewer pages or smaller files.');
-        } else {
-          notify('err', `Upload failed: ${msg}`);
+        if (!result || !result.invoice || !result.items || result.items.length === 0) {
+          setUploadBusy(false); if (fileRef.current) fileRef.current.value = '';
+          notify('err', 'Could not extract items. Try a clearer image or split into separate page photos.');
+          return;
         }
-        return;
+        allItems = result.items;
+      } else {
+        notify('info', `Processing page 1 of ${pages.length}...`);
+        try {
+          result = await parseInvoicePageAI(pages[0].base64, pages[0].fileType, 'full', 1);
+        } catch (apiErr) {
+          setUploadBusy(false); if (fileRef.current) fileRef.current.value = '';
+          notify('err', `Page 1 failed: ${apiErr.message}`); return;
+        }
+        if (!result || !result.invoice) {
+          setUploadBusy(false); if (fileRef.current) fileRef.current.value = '';
+          notify('err', 'Could not read invoice header from first page.'); return;
+        }
+        allItems = [...(result.items || [])];
+        for (let i = 1; i < pages.length; i++) {
+          notify('info', `Processing page ${i + 1} of ${pages.length}... (${allItems.length} items so far)`);
+          try {
+            const pageResult = await parseInvoicePageAI(pages[i].base64, pages[i].fileType, 'items_only', i + 1);
+            if (pageResult?.items?.length > 0) allItems = [...allItems, ...pageResult.items];
+          } catch (pageErr) { notify('err', `Page ${i + 1} failed — continuing`); }
+        }
+        if (allItems.length === 0) {
+          setUploadBusy(false); if (fileRef.current) fileRef.current.value = '';
+          notify('err', 'No items found across any pages.'); return;
+        }
+        result.items = allItems;
       }
-      if (!result || !result.invoice || !result.items || result.items.length === 0) {
-        setUploadBusy(false);
-        if (fileRef.current) fileRef.current.value = '';
-        notify('err', 'Could not extract items. Try clearer images or PDF.');
-        return;
-      }
+
       const ri = result.invoice;
       const dup = await db.findDuplicateInvoice(ri.invoice_number, ri.auction_house, ri.grand_total, ri.date, pages[0].fileName);
       if (dup) {
-        setUploadBusy(false);
-        if (fileRef.current) fileRef.current.value = '';
-        notify('err', `⚠️ Duplicate! "${dup.auction_house || 'Invoice'} #${dup.invoice_number || ''}" already exists.`);
-        return;
+        setUploadBusy(false); if (fileRef.current) fileRef.current.value = '';
+        notify('err', `⚠️ Duplicate! "${dup.auction_house || 'Invoice'} #${dup.invoice_number || ''}" already exists.`); return;
       }
-      // Upload first file as the invoice file
+
       const tempId = uid();
       const filePath = await db.uploadInvoiceFile(tempId, pages[0].base64, pages[0].fileName, pages[0].fileType);
-      const newInv = await db.insertInvoice({ date: result.invoice.date, auction_house: result.invoice.auction_house, invoice_number: result.invoice.invoice_number, event_description: result.invoice.event_description, payment_method: result.invoice.payment_method, payment_status: result.invoice.payment_status || 'Due', pickup_location: result.invoice.pickup_location, buyer_premium_rate: result.invoice.buyer_premium_rate, tax_rate: result.invoice.tax_rate, lot_total: result.invoice.lot_total, premium_total: result.invoice.premium_total, tax_total: result.invoice.tax_total, grand_total: result.invoice.grand_total, file_name: pages[0].fileName, file_type: pages[0].fileType, file_path: filePath, item_count: result.items.length });
-      const pr = result.invoice.buyer_premium_rate || 0, tr = result.invoice.tax_rate || 0.13;
-      const rows = result.items.map(it => ({ invoice_id: newInv.id, lot_number: it.lot_number, title: it.title, description: it.description, quantity: it.quantity || 1, hammer_price: it.hammer_price, premium_rate: pr, tax_rate: tr, premium_amount: +(it.hammer_price * pr).toFixed(2), subtotal: +(it.hammer_price * (1 + pr)).toFixed(2), tax_amount: +(it.hammer_price * (1 + pr) * tr).toFixed(2), total_cost: +(it.hammer_price * (1 + pr) * (1 + tr)).toFixed(2), auction_house: result.invoice.auction_house, date: result.invoice.date, pickup_location: result.invoice.pickup_location, payment_method: result.invoice.payment_method, status: 'in_inventory', purpose: 'for_sale', listing_status: 'none' }));
+      const newInv = await db.insertInvoice({ date: ri.date, auction_house: ri.auction_house, invoice_number: ri.invoice_number, event_description: ri.event_description, payment_method: ri.payment_method, payment_status: ri.payment_status || 'Due', pickup_location: ri.pickup_location, buyer_premium_rate: ri.buyer_premium_rate, tax_rate: ri.tax_rate, lot_total: ri.lot_total, premium_total: ri.premium_total, tax_total: ri.tax_total, grand_total: ri.grand_total, file_name: pages[0].fileName, file_type: pages[0].fileType, file_path: filePath, item_count: allItems.length });
+      const pr = ri.buyer_premium_rate || 0, tr = ri.tax_rate || 0.13;
+      const rows = allItems.map(it => ({ invoice_id: newInv.id, lot_number: it.lot_number, title: it.title, description: it.description, quantity: it.quantity || 1, hammer_price: it.hammer_price, premium_rate: pr, tax_rate: tr, premium_amount: +(it.hammer_price * pr).toFixed(2), subtotal: +(it.hammer_price * (1 + pr)).toFixed(2), tax_amount: +(it.hammer_price * (1 + pr) * tr).toFixed(2), total_cost: +(it.hammer_price * (1 + pr) * (1 + tr)).toFixed(2), auction_house: ri.auction_house, date: ri.date, pickup_location: ri.pickup_location, payment_method: ri.payment_method, status: 'in_inventory', purpose: 'for_sale', listing_status: 'none' }));
       const inserted = await db.insertItems(rows);
       const now = new Date().toISOString();
-      await db.addLifecycleEvents(inserted.flatMap(it => [{ item_id: it.id, event: 'Purchased', detail: `${result.invoice.auction_house}`, created_at: now }, { item_id: it.id, event: 'In Inventory', detail: `Lot #${it.lot_number} · ${fmt(it.total_cost)}`, created_at: now }]));
+      await db.addLifecycleEvents(inserted.flatMap(it => [{ item_id: it.id, event: 'Purchased', detail: `${ri.auction_house}`, created_at: now }, { item_id: it.id, event: 'In Inventory', detail: `Lot #${it.lot_number} · ${fmt(it.total_cost)}`, created_at: now }]));
       setUploadBusy(false);
-      await load(); notify('ok', `✅ ${result.items.length} items from ${result.invoice.auction_house} (${pages.length} page${pages.length>1?'s':''})`);
+      await load(); notify('ok', `✅ ${allItems.length} items from ${ri.auction_house}${pages.length > 1 ? ` (${pages.length} pages)` : ''}`);
     } catch (err) {
       setUploadBusy(false);
       notify('err', `Upload failed: ${err.message}`);
@@ -314,6 +334,14 @@ export default function App() {
     setTab('sales'); setSaleFilter('New Bill');
     notify('ok', `✅ Sold for ${fmt(amt + del)} · moved to Sales`);
   }, [modal, quickSellData, load, notify]);
+
+  const handleListInStore = useCallback(async () => {
+    const item = modal?.data; if (!item || !listStoreData.price) return;
+    await db.updateItem(item.id, { selling_price: parseFloat(listStoreData.price), selling_description: listStoreData.description || '', purpose: 'for_sale' });
+    await db.addLifecycleEvent({ item_id: item.id, event: 'Listed in Store', detail: `Price: $${listStoreData.price}` });
+    await load(); closeModal(); setListStoreData({ price: '', description: '' });
+    notify('ok', '🛒 Listed in store!');
+  }, [modal, listStoreData, load, notify]);
 
   const handleSell = useCallback(async () => {
     const item = modal?.data; if (!item || !sf.amount) return; const amt = parseFloat(sf.amount); if (isNaN(amt)) return;
@@ -479,9 +507,10 @@ export default function App() {
           </div>
 
           {/* Quick actions */}
-          <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:10,marginBottom:16}}>
-            <label role="button" style={{...S.qAct,opacity:uploadBusy?.5:1,pointerEvents:uploadBusy?'none':'auto'}}><input ref={fileRef} type="file" accept=".pdf,.png,.jpg,.jpeg,.webp" multiple onChange={handleUpload} style={{display:'none'}}/><span style={{fontSize:28,marginBottom:4}}>{uploadBusy?'⏳':'📄'}</span><span style={{fontSize:13,fontWeight:700}}>{uploadBusy?'Analyzing...':'Upload Invoice'}</span></label>
+          <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:10,marginBottom:16}}>
+            <label role="button" style={{...S.qAct,opacity:uploadBusy?.5:1,pointerEvents:uploadBusy?'none':'auto'}}><input ref={fileRef} type="file" accept=".pdf,.png,.jpg,.jpeg,.webp" multiple onChange={handleUpload} style={{display:'none'}}/><span style={{fontSize:28,marginBottom:4}}>{uploadBusy?'⏳':'📄'}</span><span style={{fontSize:13,fontWeight:700}}>{uploadBusy?'Analyzing...':'Upload'}</span></label>
             <div style={S.qAct} onClick={()=>{setTab('sales');setSaleFilter('New Bill');setModal({type:'billOfSale'});}}><span style={{fontSize:28,marginBottom:4}}>🧾</span><span style={{fontSize:13,fontWeight:700}}>Bill of Sale</span></div>
+            <div style={S.qAct} onClick={()=>window.open('/store','_blank')}><span style={{fontSize:28,marginBottom:4}}>🛒</span><span style={{fontSize:13,fontWeight:700}}>My Store</span></div>
           </div>
 
           {/* Alerts */}
@@ -608,6 +637,7 @@ export default function App() {
                 <div style={S.acts}>
                   {hasPh?<button style={{...S.chip,background:'var(--accent-light)',color:'var(--accent)',fontWeight:700}} onClick={()=>{setModal({type:'photos',data:item});loadPhotos(item.id);}}>✏️ Edit Photos ({ph.length})</button>:<button style={S.chip} onClick={()=>{setModal({type:'photos',data:item});loadPhotos(item.id);}}>📷 Add Photos</button>}
                   <button style={{...S.chip,background:'var(--green-light)',color:'var(--green)',fontWeight:700}} onClick={()=>openCustomerShare(item)}>📤 Share</button>
+                  <button style={{...S.chip,background:'#EBF5FF',color:'#2563EB',fontWeight:700}} onClick={()=>{setListStoreData({price:item.selling_price||item.listing_price||'',description:item.selling_description||''});setModal({type:'listStore',data:item});}}>🛒 Store</button>
                   <button style={S.chip} onClick={()=>{setModal({type:'notes',data:item,isSold:false});loadItemNotes(item.id,null);}}>💬{nc>0?` ${nc}`:''}</button>
                   <button style={S.chip} onClick={()=>setModal({type:'itemActions',data:item})}>⚙️ More</button>
                   {item.purpose!=='personal'&&<button style={{...S.chip,background:'var(--accent-light)',color:'var(--accent)',fontWeight:700}} onClick={()=>setModal({type:'sell',data:item})}>💰 Sell</button>}
@@ -781,6 +811,8 @@ export default function App() {
         {tab==='account'&&<>
           <div style={S.hdr}><h1 style={{fontSize:24,fontWeight:800}}>Account</h1></div>
           <div style={{...S.card,padding:16,marginBottom:12,display:'flex',justifyContent:'space-between',alignItems:'center'}}><p style={{fontSize:14,fontWeight:600}}>{user?.email}</p><button style={{...S.chip,color:'var(--red)',fontWeight:600}} onClick={()=>db.signOut()}>Sign Out</button></div>
+          <button style={{...S.btn1,width:'100%',marginBottom:14,background:'#2563EB'}} onClick={()=>window.open('/store','_blank')}>🛒 Open My Store — Share with Customers</button>
+          <button style={{...S.btn2,width:'100%',marginBottom:14}} onClick={()=>{const url=window.location.origin+'/store';navigator.clipboard?.writeText(url);notify('ok','Store link copied!');}}>📋 Copy Store Link</button>
 
           {/* Issues section inside Account */}
           {(openNotes.length>0||resolvedNotes.length>0)&&<>
@@ -851,6 +883,7 @@ export default function App() {
         <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:8}}>
           <button style={{...S.btn1,fontSize:13,padding:'12px'}} onClick={()=>{closeModal();setTimeout(()=>{setModal({type:'photos',data:it});loadPhotos(it.id);},50);}}>📷 Photos{ph.length>0?` (${ph.length})`:''}</button>
           <button style={{...S.btn2,fontSize:13,padding:'12px'}} onClick={()=>{closeModal();setTimeout(()=>openCustomerShare(it),50);}}>📤 Share</button>
+          <button style={{...S.btn2,fontSize:13,padding:'12px'}} onClick={()=>{closeModal();setTimeout(()=>{setListStoreData({price:it.selling_price||it.listing_price||'',description:it.selling_description||''});setModal({type:'listStore',data:it});},50);}}>🛒 Store</button>
           <button style={{...S.btn2,fontSize:13,padding:'12px'}} onClick={()=>{closeModal();setTimeout(()=>setModal({type:'sell',data:it}),50);}}>💰 Sell</button>
           <button style={{...S.btn2,fontSize:13,padding:'12px'}} onClick={()=>{addToReturn(it);setTab('returns');closeModal();}}>↩️ Return</button>
           <button style={{...S.btn2,fontSize:13,padding:'12px'}} onClick={()=>{closeModal();setTimeout(()=>{setModal({type:'notes',data:it,isSold:false});loadItemNotes(it.id,null);},50);}}>💬 Notes{nc>0?` (${nc})`:''}</button>
@@ -960,6 +993,23 @@ export default function App() {
           <button style={{...S.btn2,padding:'12px 24px',fontSize:14,color:'#fff',borderColor:'rgba(255,255,255,.3)'}} onClick={()=>setPhotoPreview(null)}>✕ Close</button>
         </div>
       </div>}
+
+      {/* LIST IN STORE */}
+      {modal?.type==='listStore'&&<OL close={closeModal}>
+        <h3 style={S.mT}>🛒 List in Store</h3>
+        <p style={{fontSize:13,color:'var(--text-muted)',marginBottom:12}}>{modal.data.title}</p>
+        {(()=>{const ph=(itemPhotos[modal.data.id]||[])[0];return ph?.url?<img src={ph.url} alt="" style={{width:'100%',height:140,objectFit:'cover',borderRadius:12,marginBottom:12}}/>:null;})()}
+        <Lbl t="Selling Price *"/>
+        <input style={S.inp} type="number" step="0.01" placeholder="Enter price customers will see" value={listStoreData.price} onChange={e=>setListStoreData({...listStoreData,price:e.target.value})} autoFocus/>
+        <Lbl t="Description for Customers"/>
+        <textarea style={{...S.inp,minHeight:80,resize:'vertical'}} placeholder="Describe the item — condition, dimensions, features..." value={listStoreData.description} onChange={e=>setListStoreData({...listStoreData,description:e.target.value})}/>
+        {listStoreData.price&&<div style={{background:'var(--accent-light)',padding:'10px 14px',borderRadius:10,marginTop:10,display:'flex',justifyContent:'space-between'}}>
+          <span style={{fontSize:13}}>Customer sees</span>
+          <span style={{fontSize:16,fontWeight:800,color:'var(--accent)'}}>${parseFloat(listStoreData.price).toFixed(2)}</span>
+        </div>}
+        <button style={{...S.btn1,width:'100%',marginTop:14}} onClick={handleListInStore} disabled={!listStoreData.price}>🛒 List in Store</button>
+        <p style={{fontSize:11,color:'var(--text-muted)',textAlign:'center',marginTop:8}}>Customers will see this at <b>{window.location.origin}/store</b></p>
+      </OL>}
 
       {/* QUICK SELL — from Sold status chip */}
       {modal?.type==='quickSell'&&<OL close={closeModal}>
@@ -1078,4 +1128,3 @@ function SC({si,i,onBill,onShare,onLC,onNote,onMarkPaid,onEdit,onReturn,noteCoun
 </div>;}
 
 const S={shell:{display:'flex',flexDirection:'column',height:'100%',background:'var(--bg)'},center:{display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',height:'100vh',background:'var(--bg)'},main:{flex:1,overflow:'auto',padding:'0 16px 80px'},hdr:{padding:'18px 0 14px'},secT:{fontSize:16,fontWeight:700,margin:'14px 0 10px'},card:{background:'var(--bg-card)',borderRadius:14,boxShadow:'var(--shadow-sm)',overflow:'hidden'},qAct:{display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',gap:4,padding:'22px 12px',background:'var(--bg-card)',borderRadius:14,border:'2px dashed var(--border)',cursor:'pointer',textAlign:'center',boxShadow:'var(--shadow-sm)'},inp:{width:'100%',padding:'12px 14px',background:'var(--bg-surface)',border:'1px solid var(--border)',borderRadius:10,fontSize:15,color:'var(--text)',fontFamily:'var(--font)',boxSizing:'border-box',outline:'none'},label:{display:'block',fontSize:11,fontWeight:600,color:'var(--text-muted)',textTransform:'uppercase',letterSpacing:.3,margin:'10px 0 4px'},btn1:{padding:'14px 24px',background:'var(--accent)',color:'#fff',border:'none',borderRadius:12,fontSize:15,fontWeight:700,fontFamily:'var(--font)',textAlign:'center',cursor:'pointer'},btn2:{padding:'12px 16px',background:'var(--bg-surface)',border:'1px solid var(--border)',borderRadius:12,fontSize:14,color:'var(--text)',fontFamily:'var(--font)',textAlign:'center',cursor:'pointer'},chip:{padding:'7px 12px',background:'var(--bg-surface)',border:'none',borderRadius:20,fontSize:12,color:'var(--text-secondary)',fontFamily:'var(--font)',cursor:'pointer'},acts:{display:'flex',gap:6,padding:'8px 14px',borderTop:'1px solid var(--border-light)',flexWrap:'wrap'},togBtn:{flex:1,padding:'10px',borderRadius:10,border:'1px solid var(--border)',background:'var(--bg-surface)',fontSize:14,fontFamily:'var(--font)',textAlign:'center',cursor:'pointer',color:'var(--text-secondary)'},togOn:{background:'var(--accent-light)',color:'var(--accent)',borderColor:'var(--accent)',fontWeight:700},pills:{display:'flex',gap:6,overflowX:'auto',marginBottom:12,paddingBottom:2},pill:{padding:'8px 16px',borderRadius:22,border:'1px solid var(--border)',background:'var(--bg-card)',fontSize:13,color:'var(--text-secondary)',whiteSpace:'nowrap',fontFamily:'var(--font)',cursor:'pointer',fontWeight:500},pillOn:{background:'var(--accent)',color:'#fff',borderColor:'var(--accent)',fontWeight:700},thumb:{width:52,height:52,borderRadius:12,overflow:'hidden',flexShrink:0,background:'var(--bg-surface)',display:'flex',alignItems:'center',justifyContent:'center',cursor:'pointer',border:'1px solid var(--border-light)'},thumbImg:{width:'100%',height:'100%',objectFit:'cover'},nav:{display:'flex',justifyContent:'space-around',background:'var(--bg-card)',borderTop:'1px solid var(--border)',position:'fixed',bottom:0,left:0,right:0,zIndex:50,paddingBottom:'env(safe-area-inset-bottom, 0px)'},navBtn:{display:'flex',flexDirection:'column',alignItems:'center',gap:1,padding:'8px 0',minWidth:50,background:'none',border:'none',fontFamily:'var(--font)',position:'relative',cursor:'pointer'},badge:{position:'absolute',top:0,right:2,background:'var(--accent)',color:'#fff',fontSize:8,fontWeight:700,padding:'1px 4px',borderRadius:10,minWidth:14,textAlign:'center'},overlay:{position:'fixed',inset:0,background:'rgba(0,0,0,.45)',display:'flex',alignItems:'flex-end',justifyContent:'center',zIndex:100},sheet:{background:'var(--bg-card)',borderRadius:'20px 20px 0 0',padding:'8px 20px 28px',width:'100%',maxWidth:500,maxHeight:'88vh',overflow:'auto'},handle:{width:36,height:4,background:'var(--border)',borderRadius:4,margin:'0 auto 16px'},mT:{fontSize:18,fontWeight:700,marginBottom:4},tabBar:{display:'flex',gap:0,marginBottom:14,border:'1px solid var(--border)',borderRadius:12,overflow:'hidden'},tabBtn:{flex:1,padding:'10px 0',border:'none',background:'var(--bg-surface)',fontSize:12,fontFamily:'var(--font)',cursor:'pointer',color:'var(--text-muted)',textAlign:'center',fontWeight:500},tabOn:{background:'var(--accent)',color:'#fff',fontWeight:700},spin:{width:28,height:28,border:'3px solid var(--border)',borderTopColor:'var(--accent)',borderRadius:'50%',animation:'spin .8s linear infinite'},miniSpin:{width:14,height:14,border:'2px solid rgba(255,255,255,.4)',borderTopColor:'#fff',borderRadius:'50%',animation:'spin .6s linear infinite',flexShrink:0,marginRight:8},toast:{position:'fixed',top:12,left:16,right:16,padding:'12px 16px',borderRadius:14,color:'#fff',fontSize:14,fontWeight:600,display:'flex',alignItems:'center',zIndex:999,boxShadow:'0 4px 16px rgba(0,0,0,.2)'},fullOL:{position:'fixed',inset:0,background:'rgba(0,0,0,.6)',display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',zIndex:300}};
-
