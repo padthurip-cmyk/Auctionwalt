@@ -2,13 +2,25 @@
 
 export async function parseInvoiceAI(base64, fileType) {
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 60000);
+  const timeout = setTimeout(() => controller.abort(), 90000);
   try {
     const r = await fetch('/api/parse-invoice', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ base64, fileType }), signal: controller.signal });
     clearTimeout(timeout); const data = await r.json();
     if (!r.ok || data.error) throw new Error(data.error || `Server error ${r.status}`);
     return data;
-  } catch (err) { clearTimeout(timeout); if (err.name === 'AbortError') throw new Error('Invoice took too long. Try a clearer image.'); throw err; }
+  } catch (err) { clearTimeout(timeout); if (err.name === 'AbortError') throw new Error('Invoice took too long. Try uploading pages separately.'); throw err; }
+}
+
+// Parse a single page — used for multi-page uploads
+export async function parseInvoicePageAI(base64, fileType, mode, pageNumber) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 90000);
+  try {
+    const r = await fetch('/api/parse-invoice', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ base64, fileType, mode, pageNumber }), signal: controller.signal });
+    clearTimeout(timeout); const data = await r.json();
+    if (!r.ok || data.error) throw new Error(data.error || `Server error ${r.status}`);
+    return data;
+  } catch (err) { clearTimeout(timeout); if (err.name === 'AbortError') throw new Error(`Page ${pageNumber} timed out. Try again.`); throw err; }
 }
 
 export async function generateReceiptAI(soldItem, bizInfo, customerInfo) {
