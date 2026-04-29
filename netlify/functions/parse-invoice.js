@@ -1,32 +1,27 @@
 // netlify/functions/parse-invoice.js
 
 export default async (req, context) => {
-  if (req.method === 'OPTIONS') {
-    return new Response('', { status: 204, headers: corsHeaders() });
-  }
-  if (req.method !== 'POST') {
-    return new Response(JSON.stringify({ error: 'Method not allowed' }), { status: 405, headers: corsHeaders() });
-  }
+  if (req.method === 'OPTIONS') return new Response('', { status: 204, headers: corsHeaders() });
+  if (req.method !== 'POST') return new Response(JSON.stringify({ error: 'Method not allowed' }), { status: 405, headers: corsHeaders() });
 
   const apiKey = process.env.ANTHROPIC_API_KEY;
-  if (!apiKey) {
-    return new Response(
-      JSON.stringify({ error: 'ANTHROPIC_API_KEY not set in Netlify env vars.' }),
-      { status: 500, headers: corsHeaders() }
-    );
-  }
+  if (!apiKey) return new Response(JSON.stringify({ error: 'ANTHROPIC_API_KEY not set.' }), { status: 500, headers: corsHeaders() });
 
   try {
     const body = await req.json();
-    const { base64, fileType } = body;
+    const { base64, fileType, mode, pageNumber } = body;
+    if (!base64) return new Response(JSON.stringify({ error: 'No file data' }), { status: 400, headers: corsHeaders() });
 
-    if (!base64) {
-      return new Response(JSON.stringify({ error: 'No file data' }), { status: 400, headers: corsHeaders() });
-    }
+    // mode: "full" (default) = invoice header + items | "items_only" = just items (for subsequent pages)
+    const isItemsOnly = mode === 'items_only';
 
-    const systemPrompt = `You extract ALL items from auction invoices. Return ONLY valid JSON (no markdown, no backticks, no preamble):
+    const systemPrompt = isItemsOnly
+      ? `You extract ALL auction lot items from this invoice page. This is page ${pageNumber || '?'} of a multi-page invoice. Return ONLY valid JSON (no markdown, no backticks):
+{"items":[{"lot_number":"","title":"Short title","description":"Full description","quantity":1,"hammer_price":0.00}]}
+Rules: Extract EVERY lot/item on this page. Do NOT skip any. hammer_price = bid amount before premium/tax.`
+      : `You extract ALL items from auction invoices. Return ONLY valid JSON (no markdown, no backticks):
 {"invoice":{"date":"YYYY-MM-DD","auction_house":"","invoice_number":"","event_description":"","payment_method":"Cash/Credit/Visa/Online/Flywire/Unknown","payment_status":"Paid/Unpaid","pickup_location":"","buyer_premium_rate":0.17,"tax_rate":0.13,"lot_total":0,"premium_total":0,"tax_total":0,"grand_total":0},"items":[{"lot_number":"","title":"Short title","description":"Full description","quantity":1,"hammer_price":0.00}]}
-Rules: Extract every single lot/item. buyer_premium_rate as decimal. tax_rate typically 0.13. Be precise.`;
+Rules: Extract EVERY single lot/item. buyer_premium_rate as decimal. tax_rate typically 0.13. Do NOT miss any items.`;
 
     const content = [];
     if (fileType?.includes('pdf')) {
@@ -36,33 +31,18 @@ Rules: Extract every single lot/item. buyer_premium_rate as decimal. tax_rate ty
     } else {
       content.push({ type: 'text', text: base64 });
     }
-    content.push({ type: 'text', text: 'Extract all invoice data and items. Return ONLY the JSON.' });
+    content.push({ type: 'text', text: isItemsOnly ? 'Extract ALL items/lots from this page. Return ONLY JSON.' : 'Extract all invoice data and every item. Return ONLY JSON.' });
 
     const response = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': apiKey,
-        'anthropic-version': '2023-06-01',
-      },
-      body: JSON.stringify({
-        model: 'claude-sonnet-4-20250514',
-        max_tokens: 8000,
-        system: systemPrompt,
-        messages: [{ role: 'user', content }],
-      }),
+      headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' },
+      body: JSON.stringify({ model: 'claude-sonnet-4-20250514', max_tokens: 16384, system: systemPrompt, messages: [{ role: 'user', content }] }),
     });
 
     const responseText = await response.text();
-
     if (!response.ok) {
       let errMsg;
-      try {
-        const errData = JSON.parse(responseText);
-        errMsg = errData.error?.message || `Claude API error ${response.status}`;
-      } catch {
-        errMsg = `Claude API error ${response.status}`;
-      }
+      try { errMsg = JSON.parse(responseText).error?.message || `API error ${response.status}`; } catch { errMsg = `API error ${response.status}`; }
       return new Response(JSON.stringify({ error: errMsg }), { status: response.status, headers: corsHeaders() });
     }
 
@@ -74,31 +54,45 @@ Rules: Extract every single lot/item. buyer_premium_rate as decimal. tax_rate ty
     try {
       parsed = JSON.parse(clean);
     } catch {
-      return new Response(
-        JSON.stringify({ error: 'AI returned invalid data. Try uploading again.' }),
-        { status: 500, headers: corsHeaders() }
-      );
+      // Try to recover truncated JSON
+      parsed = recoverJSON(clean);
+      if (!parsed) {
+        return new Response(JSON.stringify({ error: 'Response was too large and got truncated. Upload each page as a separate image.' }), { status: 500, headers: corsHeaders() });
+      }
     }
 
     return new Response(JSON.stringify(parsed), { status: 200, headers: corsHeaders() });
-
   } catch (err) {
-    return new Response(
-      JSON.stringify({ error: err.message || 'Failed to parse invoice' }),
-      { status: 500, headers: corsHeaders() }
-    );
+    return new Response(JSON.stringify({ error: err.message || 'Failed to parse invoice' }), { status: 500, headers: corsHeaders() });
   }
 };
 
-function corsHeaders() {
-  return {
-    'Content-Type': 'application/json',
-    'Access-Control-Allow-Origin': '*',
-    'Access-Control-Allow-Methods': 'POST, OPTIONS',
-    'Access-Control-Allow-Headers': 'Content-Type',
-  };
+function recoverJSON(text) {
+  try { return JSON.parse(text); } catch {}
+  // Find the last complete } in the items array and close the JSON
+  try {
+    const arrStart = text.indexOf('[', text.indexOf('"items"'));
+    if (arrStart === -1) return null;
+    let lastClose = -1, depth = 0, inStr = false, esc = false;
+    for (let i = arrStart; i < text.length; i++) {
+      const c = text[i];
+      if (esc) { esc = false; continue; }
+      if (c === '\\') { esc = true; continue; }
+      if (c === '"') { inStr = !inStr; continue; }
+      if (inStr) continue;
+      if (c === '{') depth++;
+      if (c === '}') { depth--; if (depth === 0) lastClose = i; }
+    }
+    if (lastClose > arrStart) {
+      const attempt = text.substring(0, lastClose + 1) + ']}';
+      try { return JSON.parse(attempt); } catch {}
+    }
+  } catch {}
+  return null;
 }
 
-export const config = {
-  path: '/api/parse-invoice',
-};
+function corsHeaders() {
+  return { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Methods': 'POST, OPTIONS', 'Access-Control-Allow-Headers': 'Content-Type' };
+}
+
+export const config = { path: '/api/parse-invoice' };
