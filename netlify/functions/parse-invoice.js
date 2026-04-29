@@ -12,7 +12,6 @@ export default async (req, context) => {
     const { base64, fileType, mode, pageNumber } = body;
     if (!base64) return new Response(JSON.stringify({ error: 'No file data' }), { status: 400, headers: corsHeaders() });
 
-    // mode: "full" (default) = invoice header + items | "items_only" = just items (for subsequent pages)
     const isItemsOnly = mode === 'items_only';
 
     const systemPrompt = isItemsOnly
@@ -54,7 +53,6 @@ Rules: Extract EVERY single lot/item. buyer_premium_rate as decimal. tax_rate ty
     try {
       parsed = JSON.parse(clean);
     } catch {
-      // Try to recover truncated JSON
       parsed = recoverJSON(clean);
       if (!parsed) {
         return new Response(JSON.stringify({ error: 'Response was too large and got truncated. Upload each page as a separate image.' }), { status: 500, headers: corsHeaders() });
@@ -69,7 +67,6 @@ Rules: Extract EVERY single lot/item. buyer_premium_rate as decimal. tax_rate ty
 
 function recoverJSON(text) {
   try { return JSON.parse(text); } catch {}
-  // Find the last complete } in the items array and close the JSON
   try {
     const arrStart = text.indexOf('[', text.indexOf('"items"'));
     if (arrStart === -1) return null;
