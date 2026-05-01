@@ -19,7 +19,7 @@ export async function parseInvoicePageAI(base64, fileType, mode, pageNumber) {
     clearTimeout(timeout); const data = await r.json();
     if (!r.ok || data.error) throw new Error(data.error || `Server error ${r.status}`);
     return data;
-  } catch (err) { clearTimeout(timeout); if (err.name === 'AbortError') throw new Error(`Page ${pageNumber} timed out. Try again.`); throw err; }
+  } catch (err) { clearTimeout(timeout); if (err.name === 'AbortError') throw new Error(`Page ${pageNumber} timed out.`); throw err; }
 }
 
 export async function generateReceiptAI(soldItem, bizInfo, customerInfo) {
@@ -30,7 +30,7 @@ export async function generateReceiptAI(soldItem, bizInfo, customerInfo) {
     clearTimeout(timeout); const data = await r.json();
     if (!r.ok || data.error) throw new Error(data.error || `Server error ${r.status}`);
     return data.html;
-  } catch (err) { clearTimeout(timeout); if (err.name === 'AbortError') throw new Error('Timed out. Try again.'); throw err; }
+  } catch (err) { clearTimeout(timeout); if (err.name === 'AbortError') throw new Error('Timed out.'); throw err; }
 }
 
 export async function generateBillAI({ billNumber, items, buyer, seller, billStatus, taxRate, date }) {
