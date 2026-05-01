@@ -12,41 +12,41 @@ export default async (req, context) => {
     const { base64, fileType, mode, pageNumber } = body;
     if (!base64) return new Response(JSON.stringify({ error: 'No file data' }), { status: 400, headers: corsHeaders() });
 
+    // 3 modes: "full" | "items_only" | "summary"
     const isItemsOnly = mode === 'items_only';
+    const isSummary = mode === 'summary';
 
-    const systemPrompt = isItemsOnly
-      ? `You extract ALL items/lots from this auction invoice page (page ${pageNumber || '?'} of multi-page). Return ONLY valid JSON (no markdown, no backticks):
-{"items":[{"lot_number":"","title":"Short item title","description":"Full description","quantity":1,"hammer_price":0.00,"premium_amount":0.00,"tax_amount":0.00,"other_fees":0.00,"other_fees_desc":"","total_cost":0.00}]}
+    let systemPrompt;
+
+    if (isSummary) {
+      // Summary mode: extract ONLY totals from a summary/final page
+      systemPrompt = `Extract the invoice summary totals from this page. Return ONLY valid JSON:
+{"summary":{"lot_total":0,"premium_rate":0.16,"premium_total":0,"handling_fee_total":0,"tax_total":0,"grand_total":0,"other_fees_total":0,"other_fees_labels":"","total_quantity":0}}
+Look for lines like: Total Extended Price, Buyer's Premium, Handling Fee, Tax, Invoice Total, Remaining Invoice Balance. Read the EXACT numbers. premium_rate as decimal (16%=0.16).`;
+
+    } else if (isItemsOnly) {
+      // Items-only mode: extract items from subsequent pages
+      systemPrompt = `Extract ALL items from this auction invoice page ${pageNumber || ''}. Return ONLY valid JSON:
+{"items":[{"lot_number":"","title":"Short title","description":"Full description","quantity":1,"hammer_price":0.00,"handling_fee":0.00}]}
 CRITICAL RULES:
-- Extract EVERY item/lot. Do NOT skip any.
-- hammer_price = the bid/hammer/lot amount ONLY
-- premium_amount = buyer's premium for THIS item (read from invoice, do NOT guess)
-- tax_amount = tax for THIS item (read from invoice, do NOT guess)
-- other_fees = any additional charges for this item (handling, processing, storage, holding, shipping, etc). Sum all extra fees into this one number.
-- other_fees_desc = short label of what the extra fees are (e.g. "handling, storage")
-- total_cost = the ACTUAL total shown on invoice for this item. If the invoice shows a per-item total, USE THAT. If not, sum: hammer + premium + tax + other_fees
-- Read the REAL numbers from the invoice. Do NOT calculate or estimate — copy the exact amounts shown.`
-      : `You extract ALL data from auction invoices. Return ONLY valid JSON (no markdown, no backticks):
-{"invoice":{"date":"YYYY-MM-DD","auction_house":"","invoice_number":"","event_description":"","payment_method":"Cash/Credit/Visa/Online/Flywire/Unknown","payment_status":"Paid/Unpaid/Due","pickup_location":"","buyer_premium_rate":0.00,"tax_rate":0.00,"lot_total":0,"premium_total":0,"tax_total":0,"other_fees_total":0,"other_fees_labels":"","grand_total":0},"items":[{"lot_number":"","title":"Short title","description":"Full description","quantity":1,"hammer_price":0.00,"premium_amount":0.00,"tax_amount":0.00,"other_fees":0.00,"other_fees_desc":"","total_cost":0.00}]}
+- Extract EVERY item/lot on this page. Do NOT skip any.
+- hammer_price = the extended price / bid amount shown for the item
+- IMPORTANT: If there is a "Handling Fee" line below an item (like "Handling Fee - 1.00"), put that amount in handling_fee for THAT item.
+- If this page only has summary totals and no items, return {"items":[]}`;
+
+    } else {
+      // Full mode: extract invoice header + items from page 1
+      systemPrompt = `Extract invoice details and ALL items from this auction invoice. Return ONLY valid JSON:
+{"invoice":{"date":"YYYY-MM-DD","auction_house":"","invoice_number":"","event_description":"","payment_method":"","payment_status":"Unpaid","pickup_location":"","buyer_premium_rate":0.00,"tax_rate":0.13},"items":[{"lot_number":"","title":"Short title","description":"Full description","quantity":1,"hammer_price":0.00,"handling_fee":0.00}]}
 CRITICAL RULES:
-- Extract EVERY single item/lot on the invoice. Do NOT skip any.
-- For EACH item read the ACTUAL amounts from the invoice:
-  * hammer_price = bid/hammer/lot amount
-  * premium_amount = buyer's premium for this item
-  * tax_amount = tax (HST/GST/PST/VAT) for this item
-  * other_fees = ANY additional per-item charges: handling, processing, storage, holding, insurance, shipping, admin fees, etc. Sum them all.
-  * other_fees_desc = label what those fees are
-  * total_cost = the ACTUAL per-item total from the invoice. If shown, use the invoice's number. If not shown, sum all the above.
-- For the invoice header:
-  * buyer_premium_rate = the premium percentage as decimal (e.g. 20% = 0.20). Read from invoice, don't guess.
-  * tax_rate = tax percentage as decimal (e.g. 13% = 0.13)
-  * lot_total = sum of all hammer prices
-  * premium_total = total premium charges
-  * tax_total = total tax
-  * other_fees_total = total of all handling/processing/storage/other fees
-  * other_fees_labels = comma-separated names of extra fee types found
-  * grand_total = the ACTUAL invoice grand total as shown on the document
-- IMPORTANT: Read REAL numbers from the document. Do NOT calculate/estimate. The invoice total must match what's printed.`;
+- Extract EVERY item on this page
+- hammer_price = extended price / bid amount for the item
+- IMPORTANT: "Handling Fee - 1.00" lines below each item are per-item handling fees. Put in handling_fee.
+- buyer_premium_rate: read from invoice (e.g. "16% Buyer's Premium" = 0.16)
+- tax_rate: read from invoice (typically 0.13 for HST)
+- Do NOT include grand_total or summary totals in the invoice object — those come from the summary page
+- Focus on reading item data accurately`;
+    }
 
     const content = [];
     if (fileType?.includes('pdf')) {
@@ -56,7 +56,13 @@ CRITICAL RULES:
     } else {
       content.push({ type: 'text', text: base64 });
     }
-    content.push({ type: 'text', text: isItemsOnly ? 'Extract ALL items/lots from this page. Return ONLY JSON.' : 'Extract all invoice data and every item. Return ONLY JSON.' });
+
+    const userMsg = isSummary
+      ? 'Extract the invoice totals/summary from this page. Return ONLY JSON.'
+      : isItemsOnly
+        ? 'Extract ALL items and their handling fees from this page. Return ONLY JSON.'
+        : 'Extract invoice header and ALL items with handling fees. Return ONLY JSON.';
+    content.push({ type: 'text', text: userMsg });
 
     const response = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
@@ -81,7 +87,7 @@ CRITICAL RULES:
     } catch {
       parsed = recoverJSON(clean);
       if (!parsed) {
-        return new Response(JSON.stringify({ error: 'Response was too large and got truncated. Upload each page as a separate image.' }), { status: 500, headers: corsHeaders() });
+        return new Response(JSON.stringify({ error: 'Response was truncated. Try uploading fewer pages at once.' }), { status: 500, headers: corsHeaders() });
       }
     }
 
