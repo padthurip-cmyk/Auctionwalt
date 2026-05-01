@@ -127,88 +127,114 @@ export default function App() {
     setUploadBusy(true);
     try {
       const pages = [];
-      for (const file of files) {
-        const b64 = await readFileAsBase64(file);
-        pages.push({ base64: b64, fileType: file.type, fileName: file.name });
-      }
-      let result;
-      let allItems = [];
+      for (const file of files) { const b64 = await readFileAsBase64(file); pages.push({ base64: b64, fileType: file.type, fileName: file.name }); }
+      let result; let allItems = []; let summaryData = null;
 
       if (pages.length === 1) {
-        try {
-          result = await parseInvoiceAI(pages[0].base64, pages[0].fileType);
-        } catch (apiErr) {
-          setUploadBusy(false);
-          if (fileRef.current) fileRef.current.value = '';
-          const msg = apiErr.message || 'Unknown error';
-          if (msg.includes('truncated') || msg.includes('too large')) {
-            notify('err', 'Invoice too large. Try taking a photo of each page and selecting all images together.');
-          } else { notify('err', `Upload failed: ${msg}`); }
-          return;
-        }
-        if (!result || !result.invoice || !result.items || result.items.length === 0) {
-          setUploadBusy(false); if (fileRef.current) fileRef.current.value = '';
-          notify('err', 'Could not extract items. Try a clearer image or split into separate page photos.');
-          return;
-        }
+        try { result = await parseInvoiceAI(pages[0].base64, pages[0].fileType); }
+        catch (apiErr) { setUploadBusy(false); if (fileRef.current) fileRef.current.value = ''; notify('err', apiErr.message.includes('truncated') ? 'Invoice too large. Select multiple page images.' : `Upload failed: ${apiErr.message}`); return; }
+        if (!result?.invoice || !result?.items?.length) { setUploadBusy(false); if (fileRef.current) fileRef.current.value = ''; notify('err', 'Could not extract items. Try splitting into page photos.'); return; }
         allItems = result.items;
       } else {
+        // Page 1: full mode
         notify('info', `Processing page 1 of ${pages.length}...`);
-        try {
-          result = await parseInvoicePageAI(pages[0].base64, pages[0].fileType, 'full', 1);
-        } catch (apiErr) {
-          setUploadBusy(false); if (fileRef.current) fileRef.current.value = '';
-          notify('err', `Page 1 failed: ${apiErr.message}`); return;
-        }
-        if (!result || !result.invoice) {
-          setUploadBusy(false); if (fileRef.current) fileRef.current.value = '';
-          notify('err', 'Could not read invoice header from first page.'); return;
-        }
+        try { result = await parseInvoicePageAI(pages[0].base64, pages[0].fileType, 'full', 1); }
+        catch (apiErr) { setUploadBusy(false); if (fileRef.current) fileRef.current.value = ''; notify('err', `Page 1 failed: ${apiErr.message}`); return; }
+        if (!result?.invoice) { setUploadBusy(false); if (fileRef.current) fileRef.current.value = ''; notify('err', 'Could not read invoice header.'); return; }
         allItems = [...(result.items || [])];
-        for (let i = 1; i < pages.length; i++) {
-          notify('info', `Processing page ${i + 1} of ${pages.length}... (${allItems.length} items so far)`);
+        // Middle pages (NOT the last 2): items_only
+        const stopBefore = Math.max(1, pages.length - 2);
+        for (let i = 1; i < stopBefore; i++) {
+          notify('info', `Processing page ${i + 1} of ${pages.length}... (${allItems.length} items)`);
+          try { const pr = await parseInvoicePageAI(pages[i].base64, pages[i].fileType, 'items_only', i + 1); if (pr?.items?.length) allItems = [...allItems, ...pr.items]; }
+          catch (pe) { notify('err', `Page ${i + 1} failed — continuing`); }
+        }
+        // Second-to-last page: get BOTH items AND summary (it often has both)
+        if (pages.length >= 3) {
+          const p2l = pages.length - 2;
+          notify('info', `Processing page ${p2l + 1} of ${pages.length}... (${allItems.length} items)`);
+          try { const pr = await parseInvoicePageAI(pages[p2l].base64, pages[p2l].fileType, 'items_only', p2l + 1); if (pr?.items?.length) allItems = [...allItems, ...pr.items]; } catch (pe) {}
+          try { const sr = await parseInvoicePageAI(pages[p2l].base64, pages[p2l].fileType, 'summary', p2l + 1); if (sr?.summary?.grand_total > 0) summaryData = sr.summary; } catch (pe) {}
+        }
+        // Last page: try summary, then items
+        if (pages.length > 1) {
+          notify('info', `Processing page ${pages.length} of ${pages.length}... (${allItems.length} items)`);
           try {
-            const pageResult = await parseInvoicePageAI(pages[i].base64, pages[i].fileType, 'items_only', i + 1);
-            if (pageResult?.items?.length > 0) allItems = [...allItems, ...pageResult.items];
-          } catch (pageErr) { notify('err', `Page ${i + 1} failed — continuing`); }
+            const lastResult = await parseInvoicePageAI(pages[pages.length - 1].base64, pages[pages.length - 1].fileType, 'summary', pages.length);
+            if (lastResult?.summary) {
+              // Merge: prefer the page with more detail
+              if (!summaryData) { summaryData = lastResult.summary; }
+              else {
+                // If last page has grand_total but second-to-last has premium_rate, merge both
+                if (lastResult.summary.grand_total > 0 && (!summaryData.grand_total || lastResult.summary.grand_total > summaryData.grand_total)) summaryData.grand_total = lastResult.summary.grand_total;
+                if (lastResult.summary.premium_rate > 0 && !summaryData.premium_rate) summaryData.premium_rate = lastResult.summary.premium_rate;
+                if (lastResult.summary.premium_total > 0 && !summaryData.premium_total) summaryData.premium_total = lastResult.summary.premium_total;
+                if (lastResult.summary.handling_fee_total > 0 && !summaryData.handling_fee_total) summaryData.handling_fee_total = lastResult.summary.handling_fee_total;
+                if (lastResult.summary.tax_total > 0 && !summaryData.tax_total) summaryData.tax_total = lastResult.summary.tax_total;
+              }
+            }
+            // Also check for items on last page
+            const ir = await parseInvoicePageAI(pages[pages.length - 1].base64, pages[pages.length - 1].fileType, 'items_only', pages.length);
+            if (ir?.items?.length) allItems = [...allItems, ...ir.items];
+          } catch (pe) { notify('err', 'Last page failed — continuing'); }
         }
-        if (allItems.length === 0) {
-          setUploadBusy(false); if (fileRef.current) fileRef.current.value = '';
-          notify('err', 'No items found across any pages.'); return;
-        }
+        if (!allItems.length) { setUploadBusy(false); if (fileRef.current) fileRef.current.value = ''; notify('err', 'No items found.'); return; }
         result.items = allItems;
       }
 
       const ri = result.invoice;
-      const dup = await db.findDuplicateInvoice(ri.invoice_number, ri.auction_house, ri.grand_total, ri.date, pages[0].fileName);
-      if (dup) {
-        setUploadBusy(false); if (fileRef.current) fileRef.current.value = '';
-        notify('err', `⚠️ Duplicate! "${dup.auction_house || 'Invoice'} #${dup.invoice_number || ''}" already exists.`); return;
-      }
+      // Use invoice-level totals — from summary page (most accurate) or calculated
+      const lotTotal = allItems.reduce((s, it) => s + (parseFloat(it.hammer_price) || 0), 0);
+      const handlingTotal = allItems.reduce((s, it) => s + (parseFloat(it.handling_fee) || 0), 0);
+      // Premium rate: from summary > invoice header > back-calculate from totals
+      let premiumRate = parseFloat(summaryData?.premium_rate) || parseFloat(ri.buyer_premium_rate) || 0;
+      const summaryPremiumTotal = parseFloat(summaryData?.premium_total) || 0;
+      if (premiumRate === 0 && summaryPremiumTotal > 0 && lotTotal > 0) { premiumRate = +(summaryPremiumTotal / lotTotal).toFixed(4); }
+      // Tax rate
+      const taxRate = parseFloat(ri.tax_rate) || 0.13;
+      // Use summary totals when available (read from actual invoice), otherwise calculate
+      const premiumTotal = summaryPremiumTotal || +(lotTotal * premiumRate).toFixed(2);
+      const actualHandling = parseFloat(summaryData?.handling_fee_total) || handlingTotal;
+      const taxTotal = parseFloat(summaryData?.tax_total) || +((lotTotal + premiumTotal + actualHandling) * taxRate).toFixed(2);
+      const grandTotal = parseFloat(summaryData?.grand_total) || +(lotTotal + premiumTotal + actualHandling + taxTotal).toFixed(2);
+
+      const dup = await db.findDuplicateInvoice(ri.invoice_number, ri.auction_house, grandTotal, ri.date, pages[0].fileName);
+      if (dup) { setUploadBusy(false); if (fileRef.current) fileRef.current.value = ''; notify('err', `⚠️ Duplicate! "${dup.auction_house || ''} #${dup.invoice_number || ''}" exists.`); return; }
 
       const tempId = uid();
       const filePath = await db.uploadInvoiceFile(tempId, pages[0].base64, pages[0].fileName, pages[0].fileType);
-      const newInv = await db.insertInvoice({ date: ri.date, auction_house: ri.auction_house, invoice_number: ri.invoice_number, event_description: ri.event_description, payment_method: ri.payment_method, payment_status: ri.payment_status || 'Due', pickup_location: ri.pickup_location, buyer_premium_rate: ri.buyer_premium_rate, tax_rate: ri.tax_rate, lot_total: ri.lot_total, premium_total: ri.premium_total, tax_total: ri.tax_total, other_fees_total: ri.other_fees_total || 0, other_fees_labels: ri.other_fees_labels || '', grand_total: ri.grand_total, file_name: pages[0].fileName, file_type: pages[0].fileType, file_path: filePath, item_count: allItems.length });
-      const pr = parseFloat(ri.buyer_premium_rate) || 0, tr = parseFloat(ri.tax_rate) || 0.13;
+      const newInv = await db.insertInvoice({
+        date: ri.date, auction_house: ri.auction_house, invoice_number: ri.invoice_number, event_description: ri.event_description,
+        payment_method: ri.payment_method, payment_status: ri.payment_status || 'Due', pickup_location: ri.pickup_location,
+        buyer_premium_rate: premiumRate, tax_rate: taxRate,
+        lot_total: +lotTotal.toFixed(2), premium_total: +premiumTotal.toFixed(2), tax_total: +taxTotal.toFixed(2),
+        other_fees_total: +actualHandling.toFixed(2), other_fees_labels: actualHandling > 0 ? 'Handling Fee' : '',
+        grand_total: +grandTotal.toFixed(2),
+        file_name: pages[0].fileName, file_type: pages[0].fileType, file_path: filePath, item_count: allItems.length
+      });
+      const perItemHandling = actualHandling > 0 && allItems.length > 0 ? actualHandling / allItems.length : 0;
       const rows = allItems.map(it => {
         const hp = parseFloat(it.hammer_price) || 0;
-        // Use AI-extracted actuals if available, otherwise calculate as fallback
-        const premAmt = parseFloat(it.premium_amount) || +(hp * pr).toFixed(2);
-        const sub = +(hp + premAmt).toFixed(2);
-        const taxAmt = parseFloat(it.tax_amount) || +(sub * tr).toFixed(2);
-        const otherFees = parseFloat(it.other_fees) || 0;
-        const totalCost = parseFloat(it.total_cost) || +(hp + premAmt + taxAmt + otherFees).toFixed(2);
-        return { invoice_id: newInv.id, lot_number: it.lot_number, title: it.title, description: it.description, quantity: it.quantity || 1, hammer_price: hp, premium_rate: pr, tax_rate: tr, premium_amount: premAmt, subtotal: sub, tax_amount: taxAmt, other_fees: otherFees, other_fees_desc: it.other_fees_desc || '', total_cost: totalCost, auction_house: ri.auction_house, date: ri.date, pickup_location: ri.pickup_location, payment_method: ri.payment_method, status: 'in_inventory', purpose: 'for_sale', listing_status: 'none' };
+        const handling = parseFloat(it.handling_fee) || +perItemHandling.toFixed(2);
+        const premAmt = +(hp * premiumRate).toFixed(2);
+        const subtotal = +(hp + premAmt).toFixed(2);
+        const taxable = +(hp + premAmt + handling).toFixed(2);
+        const taxAmt = +(taxable * taxRate).toFixed(2);
+        const totalCost = +(hp + premAmt + handling + taxAmt).toFixed(2);
+        return {
+          invoice_id: newInv.id, lot_number: it.lot_number, title: it.title, description: it.description, quantity: it.quantity || 1,
+          hammer_price: hp, premium_rate: premiumRate, tax_rate: taxRate, premium_amount: premAmt, subtotal, tax_amount: taxAmt,
+          other_fees: handling, other_fees_desc: handling > 0 ? 'Handling Fee' : '', total_cost: totalCost,
+          auction_house: ri.auction_house, date: ri.date, pickup_location: ri.pickup_location, payment_method: ri.payment_method,
+          status: 'in_inventory', purpose: 'for_sale', listing_status: 'none'
+        };
       });
       const inserted = await db.insertItems(rows);
       const now = new Date().toISOString();
       await db.addLifecycleEvents(inserted.flatMap(it => [{ item_id: it.id, event: 'Purchased', detail: `${ri.auction_house}`, created_at: now }, { item_id: it.id, event: 'In Inventory', detail: `Lot #${it.lot_number} · ${fmt(it.total_cost)}`, created_at: now }]));
-      setUploadBusy(false);
-      await load(); notify('ok', `✅ ${allItems.length} items from ${ri.auction_house}${pages.length > 1 ? ` (${pages.length} pages)` : ''}`);
-    } catch (err) {
-      setUploadBusy(false);
-      notify('err', `Upload failed: ${err.message}`);
-    }
+      setUploadBusy(false); await load();
+      notify('ok', `✅ ${allItems.length} items · ${fmt(grandTotal)}${pages.length > 1 ? ` (${pages.length} pages)` : ''}`);
+    } catch (err) { setUploadBusy(false); notify('err', `Upload failed: ${err.message}`); }
     if (fileRef.current) fileRef.current.value = '';
   }, [notify, load]);
 
