@@ -1,4 +1,4 @@
-=// netlify/functions/parse-invoice.js
+// netlify/functions/parse-invoice.js
 
 export default async (req, context) => {
   if (req.method === 'OPTIONS') return new Response('', { status: 204, headers: corsHeaders() });
