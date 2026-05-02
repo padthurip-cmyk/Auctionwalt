@@ -823,8 +823,13 @@ export default function App() {
                 <div><label style={S.label}>Invoice Total</label><input style={S.inp} type="number" step="0.01" placeholder="$0.00" value={manualReturn.invoiceTotal} onChange={e=>setManualReturn({...manualReturn,invoiceTotal:e.target.value})}/></div>
               </div>
             </div>
-            {/* Add item */}
-            <button style={{...S.btn1,width:'100%',marginBottom:12}} onClick={()=>setManualReturnItems(prev=>[...prev,{id:'mr_'+Date.now(),lotNumber:'',title:'',amount:'',reason:'',photos:[]}])}>+ Add Item</button>
+            {/* Add items — single or batch */}
+            <div style={{display:'flex',gap:8,marginBottom:12}}>
+              <button style={{...S.btn1,flex:1,fontSize:13}} onClick={()=>setManualReturnItems(prev=>[...prev,{id:'mr_'+Date.now(),lotNumber:'',title:'',amount:'',reason:'',photos:[]}])}>+ Add 1</button>
+              <button style={{...S.btn2,flex:1,fontSize:13}} onClick={()=>{const b=[];for(let x=0;x<5;x++)b.push({id:'mr_'+Date.now()+x,lotNumber:'',title:'',amount:'',reason:'',photos:[]});setManualReturnItems(prev=>[...prev,...b]);}}>+ Add 5</button>
+              <button style={{...S.btn2,flex:1,fontSize:13}} onClick={()=>{const b=[];for(let x=0;x<10;x++)b.push({id:'mr_'+Date.now()+x,lotNumber:'',title:'',amount:'',reason:'',photos:[]});setManualReturnItems(prev=>[...prev,...b]);}}>+ Add 10</button>
+            </div>
+            {manualReturnItems.length>0&&<p style={{fontSize:13,fontWeight:700,marginBottom:8,color:'#C2410C'}}>{manualReturnItems.length} item{manualReturnItems.length>1?'s':''} · Return value: {fmt(manualReturnItems.reduce((s,i)=>s+parseFloat(i.amount||0),0))}</p>}
             {/* Items */}
             {manualReturnItems.map((item,i)=><div key={item.id} style={{...S.card,marginBottom:8,borderLeft:'3px solid #C2410C',padding:'12px 14px'}}>
               <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:8}}>
@@ -841,7 +846,12 @@ export default function App() {
               <input style={{...S.inp,marginBottom:6}} placeholder="Reason for return" value={item.reason} onChange={e=>{const v=[...manualReturnItems];v[i]={...v[i],reason:e.target.value};setManualReturnItems(v);}}/>
               {/* Photos */}
               {item.photos.length>0&&<div style={{display:'flex',gap:4,overflowX:'auto',marginBottom:6}}>{item.photos.map((p,pi)=><div key={pi} style={{position:'relative',flexShrink:0}}><img src={p} alt="" style={{width:52,height:52,borderRadius:8,objectFit:'cover',border:'2px solid #C2410C'}}/><button onClick={()=>{const v=[...manualReturnItems];v[i]={...v[i],photos:v[i].photos.filter((_,j)=>j!==pi)};setManualReturnItems(v);}} style={{position:'absolute',top:-4,right:-4,width:18,height:18,borderRadius:9,background:'var(--red)',color:'#fff',border:'none',fontSize:10,cursor:'pointer',display:'flex',alignItems:'center',justifyContent:'center'}}>✕</button></div>)}</div>}
-              <label role="button" style={{...S.chip,background:'#FFF7ED',color:'#C2410C',fontWeight:600,fontSize:11,cursor:'pointer',display:'inline-block'}}><input type="file" accept="image/*" multiple onChange={e=>{const files=Array.from(e.target.files||[]);const urls=files.map(f=>URL.createObjectURL(f));const v=[...manualReturnItems];v[i]={...v[i],photos:[...v[i].photos,...urls]};setManualReturnItems(v);}} style={{display:'none'}}/>📷 Add Photos</label>
+              <label role="button" style={{...S.chip,background:'#FFF7ED',color:'#C2410C',fontWeight:600,fontSize:12,cursor:'pointer',display:'inline-flex',alignItems:'center',gap:4}}><input type="file" accept="image/*" multiple onChange={async(e)=>{
+                const files=Array.from(e.target.files||[]);if(!files.length)return;
+                const dataUrls=[];
+                for(const f of files){const dataUrl=await new Promise(res=>{const r=new FileReader();r.onload=()=>res(r.result);r.readAsDataURL(f);});dataUrls.push(dataUrl);}
+                const v=[...manualReturnItems];v[i]={...v[i],photos:[...v[i].photos,...dataUrls]};setManualReturnItems(v);
+              }} style={{display:'none'}}/>📷 Photos ({item.photos.length})</label>
             </div>)}
             {/* Print */}
             {manualReturnItems.length>0&&<div style={{display:'flex',flexDirection:'column',gap:8,marginTop:12}}>
@@ -849,11 +859,20 @@ export default function App() {
                 const mr=manualReturn;const items=manualReturnItems;
                 const ihtml=items.map(item=>`<div class="item"><h2>${item.title||'Untitled'}</h2><table><tr><td><b>Lot/Unit #</b></td><td>${item.lotNumber||'—'}</td></tr><tr><td><b>Invoice #</b></td><td>${mr.invoiceNumber||'—'}</td></tr><tr><td><b>Vendor</b></td><td>${mr.vendor||'—'}</td></tr><tr><td><b>Bid Date</b></td><td>${mr.bidDate||'—'}</td></tr><tr><td><b>Amount</b></td><td>$${parseFloat(item.amount||0).toFixed(2)}</td></tr></table>${item.reason?`<div class="reason"><b>Reason:</b> ${item.reason}</div>`:''}${item.photos.length>0?`<p class="pl">Photos (${item.photos.length})</p><div class="photos">${item.photos.map(p=>`<img src="${p}"/>`).join('')}</div>`:''}</div>`).join('');
                 const html=`<!DOCTYPE html><html><head><meta charset="utf-8"/><title>Return Report</title><style>@page{size:A4 portrait;margin:15mm}*{margin:0;padding:0;box-sizing:border-box}body{font-family:-apple-system,Arial,sans-serif;color:#1a1a1a;-webkit-print-color-adjust:exact}h1{font-size:20pt;text-align:center;margin-bottom:3mm;padding-bottom:3mm;border-bottom:2px solid #333}.meta{text-align:center;color:#666;font-size:10pt;margin-bottom:4mm}.inv-hdr{border:1.5px solid #333;border-radius:3mm;padding:5mm;margin-bottom:6mm}.inv-hdr table{width:100%;font-size:11pt;border-collapse:collapse}.inv-hdr td{padding:2mm 3mm;border-bottom:1px solid #eee}.inv-hdr td:first-child{width:130px;color:#666;font-weight:600}.item{border:1.5px solid #ddd;border-radius:3mm;padding:5mm;margin-bottom:5mm;page-break-inside:avoid}.item h2{font-size:13pt;margin-bottom:2mm}table{width:100%;font-size:10pt;border-collapse:collapse;margin-bottom:2mm}td{padding:1.5mm 3mm;border-bottom:1px solid #eee}td:first-child{width:100px;color:#666}.reason{background:#FFF7ED;border:1px solid #FB923C;border-radius:2mm;padding:3mm;margin:2mm 0;font-size:10pt}.pl{font-size:9pt;font-weight:600;margin:2mm 0;color:#C2410C}.photos{display:flex;gap:2mm;flex-wrap:wrap}.photos img{width:40mm;height:40mm;object-fit:cover;border-radius:2mm;border:1px solid #ddd}</style></head><body><h1>Return Report</h1><p class="meta">${items.length} item(s) · ${new Date().toLocaleDateString('en-CA')}</p><div class="inv-hdr"><table><tr><td>Invoice #</td><td><b>${mr.invoiceNumber||'—'}</b></td></tr><tr><td>Vendor</td><td>${mr.vendor||'—'}</td></tr><tr><td>Bid Date</td><td>${mr.bidDate||'—'}</td></tr><tr><td>Invoice Total</td><td><b>$${parseFloat(mr.invoiceTotal||0).toFixed(2)}</b></td></tr><tr><td>Items Returned</td><td>${items.length}</td></tr><tr><td>Return Value</td><td><b>$${items.reduce((s,i)=>s+parseFloat(i.amount||0),0).toFixed(2)}</b></td></tr></table></div>${ihtml}</body></html>`;
-                const w=window.open('','_blank','width=800,height=1000');w.document.write(html);w.document.close();setTimeout(()=>{w.focus();w.print();},600);
+                const w=window.open('','_blank','width=800,height=1000');w.document.write(html);w.document.close();
+                const checkAndPrint=()=>{const imgs=w.document.querySelectorAll('img');let allLoaded=true;imgs.forEach(img=>{if(!img.complete)allLoaded=false;});if(allLoaded||imgs.length===0){setTimeout(()=>{w.focus();w.print();},400);}else{setTimeout(checkAndPrint,200);}};setTimeout(checkAndPrint,300);
               }}>🖨 Print Return Report</button>
               <button style={{...S.btn1,width:'100%',background:'var(--green)'}} onClick={()=>{
-                const cluster={id:uid(),date:new Date().toISOString(),manual:true,invoiceNumber:manualReturn.invoiceNumber,vendor:manualReturn.vendor,bidDate:manualReturn.bidDate,invoiceTotal:manualReturn.invoiceTotal,items:manualReturnItems.map(i=>({id:i.id,title:i.title,lot_number:i.lotNumber,reason:i.reason,total_cost:i.amount,photoCount:i.photos.length}))};
-                const updated=[cluster,...savedReturns];setSavedReturns(updated);try{localStorage.setItem('av_returns',JSON.stringify(updated));}catch{}
+                const cluster={id:uid(),date:new Date().toISOString(),manual:true,invoiceNumber:manualReturn.invoiceNumber,vendor:manualReturn.vendor,bidDate:manualReturn.bidDate,invoiceTotal:manualReturn.invoiceTotal,items:manualReturnItems.map(i=>({id:i.id,title:i.title,lot_number:i.lotNumber,reason:i.reason,total_cost:i.amount,photos:i.photos,photoCount:i.photos.length}))};
+                const updated=[cluster,...savedReturns];
+                try{localStorage.setItem('av_returns',JSON.stringify(updated));setSavedReturns(updated);}
+                catch(e){
+                  // Too large with photos — save without photos
+                  const lite={...cluster,items:cluster.items.map(i=>({...i,photos:[],photoCount:i.photoCount}))};
+                  const updLite=[lite,...savedReturns];
+                  try{localStorage.setItem('av_returns',JSON.stringify(updLite));setSavedReturns(updLite);notify('info','Saved without photos (storage full). Print first to keep photos.');}
+                  catch(e2){notify('err','Cannot save — too much data. Print first, then clear.');}
+                }
                 setManualReturnItems([]);setManualReturn({invoiceNumber:'',bidDate:'',invoiceTotal:'',vendor:''});notify('ok','✅ Manual return saved');
               }}>💾 Save Return</button>
               <button style={{...S.btn2,width:'100%',color:'var(--red)'}} onClick={()=>{if(confirm('Clear all?')){setManualReturnItems([]);}}}>🗑 Clear</button>
