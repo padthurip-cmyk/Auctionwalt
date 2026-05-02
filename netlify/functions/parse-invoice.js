@@ -1,4 +1,4 @@
-// netlify/functions/parse-invoice.js
+=// netlify/functions/parse-invoice.js
 
 export default async (req, context) => {
   if (req.method === 'OPTIONS') return new Response('', { status: 204, headers: corsHeaders() });
@@ -19,33 +19,42 @@ export default async (req, context) => {
     let systemPrompt;
 
     if (isSummary) {
-      // Summary mode: extract ONLY totals from a summary/final page
-      systemPrompt = `Extract the invoice summary totals from this page. Return ONLY valid JSON:
-{"summary":{"lot_total":0,"premium_rate":0.16,"premium_total":0,"handling_fee_total":0,"tax_total":0,"grand_total":0,"other_fees_total":0,"other_fees_labels":"","total_quantity":0}}
-Look for lines like: Total Extended Price, Buyer's Premium, Handling Fee, Tax, Invoice Total, Remaining Invoice Balance. Read the EXACT numbers. premium_rate as decimal (16%=0.16).`;
+      systemPrompt = `You are reading the SUMMARY/TOTALS page of an auction invoice. Extract ALL financial totals. Return ONLY valid JSON:
+{"summary":{"lot_total":0,"premium_rate":0.16,"premium_total":0,"handling_fee_total":0,"tax_total":0,"grand_total":0,"total_quantity":0}}
+LOOK FOR these exact labels (they may vary slightly):
+- "Total Extended Price" or "Lot Total" or "Subtotal" → lot_total
+- "Buyer's Premium" with a % → premium_rate (as decimal: 16%=0.16, 20%=0.20) AND premium_total (dollar amount)
+- "Handling Fee" or "Handling" → handling_fee_total 
+- "Tax" or "HST" or "GST" or "Tax1 Default" → tax_total
+- "Invoice Total" or "Grand Total" or "Total Due" or "Remaining Invoice Balance" → grand_total
+- "Total Quantity" → total_quantity
+READ THE EXACT DOLLAR AMOUNTS. Do not calculate. If a line says "16% Buyer's Premium: 36.00" then premium_rate=0.16 and premium_total=36.00.
+If this page has BOTH items AND a summary section, still extract the summary totals.`;
 
     } else if (isItemsOnly) {
-      // Items-only mode: extract items from subsequent pages
-      systemPrompt = `Extract ALL items from this auction invoice page ${pageNumber || ''}. Return ONLY valid JSON:
-{"items":[{"lot_number":"","title":"Short title","description":"Full description","quantity":1,"hammer_price":0.00,"handling_fee":0.00}]}
-CRITICAL RULES:
-- Extract EVERY item/lot on this page. Do NOT skip any.
-- hammer_price = the extended price / bid amount shown for the item
-- IMPORTANT: If there is a "Handling Fee" line below an item (like "Handling Fee - 1.00"), put that amount in handling_fee for THAT item.
-- If this page only has summary totals and no items, return {"items":[]}`;
+      systemPrompt = `Extract EVERY item/lot from this auction invoice page (page ${pageNumber || '?'}). Return ONLY valid JSON:
+{"items":[{"lot_number":"","title":"Short title","description":"","quantity":1,"hammer_price":0.00,"handling_fee":0.00}]}
+RULES:
+- Extract EVERY SINGLE item. Count them carefully. Do NOT skip any.
+- lot_number = the lot/item number (e.g. 1368, 1372, etc.)
+- hammer_price = the EXTENDED PRICE shown (e.g. "1 x 5.50   5.50" → hammer_price is 5.50)
+- If there is a "Handling Fee -   1.00" line below an item, set handling_fee=1.00 for that item
+- Include items that continue from a previous page (partial descriptions at top)
+- If this page has summary totals at the bottom (Total Extended Price, Premium, etc), still extract all items above it
+- Return {"items":[]} ONLY if there are truly zero items on this page`;
 
     } else {
-      // Full mode: extract invoice header + items from page 1
-      systemPrompt = `Extract invoice details and ALL items from this auction invoice. Return ONLY valid JSON:
-{"invoice":{"date":"YYYY-MM-DD","auction_house":"","invoice_number":"","event_description":"","payment_method":"","payment_status":"Unpaid","pickup_location":"","buyer_premium_rate":0.00,"tax_rate":0.13},"items":[{"lot_number":"","title":"Short title","description":"Full description","quantity":1,"hammer_price":0.00,"handling_fee":0.00}]}
-CRITICAL RULES:
-- Extract EVERY item on this page
-- hammer_price = extended price / bid amount for the item
-- IMPORTANT: "Handling Fee - 1.00" lines below each item are per-item handling fees. Put in handling_fee.
-- buyer_premium_rate: read from invoice (e.g. "16% Buyer's Premium" = 0.16)
-- tax_rate: read from invoice (typically 0.13 for HST)
-- Do NOT include grand_total or summary totals in the invoice object — those come from the summary page
-- Focus on reading item data accurately`;
+      systemPrompt = `Extract the invoice header AND ALL items from this auction invoice page. Return ONLY valid JSON:
+{"invoice":{"date":"YYYY-MM-DD","auction_house":"","invoice_number":"","event_description":"","payment_method":"","payment_status":"Unpaid","pickup_location":"","buyer_premium_rate":0.00,"tax_rate":0.13},"items":[{"lot_number":"","title":"Short title","description":"","quantity":1,"hammer_price":0.00,"handling_fee":0.00}]}
+RULES:
+- auction_house = the company name (e.g. "Ruito Trading Inc.")
+- invoice_number = Invoice # shown
+- date = invoice date in YYYY-MM-DD format
+- pickup_location = any address/location shown
+- payment_status = "Paid" or "Unpaid" (look for PAID/UNPAID stamps)
+- buyer_premium_rate = if mentioned (e.g. "16% Buyer's Premium" = 0.16), otherwise 0
+- Extract EVERY item on this page. hammer_price = the extended price amount
+- "Handling Fee - 1.00" below items = handling_fee for that item`;
     }
 
     const content = [];
