@@ -129,7 +129,27 @@ export default function App() {
     setUploadBusy(true);
     try {
       const pages = [];
-      for (const file of files) { const b64 = await readFileAsBase64(file); pages.push({ base64: b64, fileType: file.type, fileName: file.name }); }
+      for (const file of files) {
+        const b64 = await readFileAsBase64(file);
+        // Compress images to fit Netlify 6MB payload limit
+        if (file.type.startsWith('image/')) {
+          const compressed = await new Promise(res => {
+            const img = new Image();
+            img.onload = () => {
+              const c = document.createElement('canvas');
+              const mx = 1200; let w = img.width, h = img.height;
+              if (w > mx || h > mx) { if (w > h) { h = h * (mx / w); w = mx; } else { w = w * (mx / h); h = mx; } }
+              c.width = w; c.height = h; c.getContext('2d').drawImage(img, 0, 0, w, h);
+              const dataUrl = c.toDataURL('image/jpeg', 0.7);
+              res(dataUrl.split(',')[1]); // base64 only
+            };
+            img.src = 'data:' + file.type + ';base64,' + b64;
+          });
+          pages.push({ base64: compressed, fileType: 'image/jpeg', fileName: file.name });
+        } else {
+          pages.push({ base64: b64, fileType: file.type, fileName: file.name });
+        }
+      }
       let result; let allItems = []; let summaryData = null;
 
       if (pages.length === 1) {
