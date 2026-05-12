@@ -185,35 +185,23 @@ export default function App() {
       }
 
       const ri = result.invoice;
-      // ── SMART CALCULATION: Use summary totals as source of truth ──
-      const calcLotTotal = allItems.reduce((s, it) => s + (parseFloat(it.hammer_price) || 0), 0);
-      const itemHandlingSum = allItems.reduce((s, it) => s + (parseFloat(it.handling_fee) || 0), 0);
-      
-      // Prefer summary values (read from actual invoice) over calculated
-      const sPrem = parseFloat(summaryData?.premium_total) || 0;
-      const sHandling = parseFloat(summaryData?.handling_fee_total) || itemHandlingSum;
-      const sTax = parseFloat(summaryData?.tax_total) || 0;
-      const sGrand = parseFloat(summaryData?.grand_total) || 0;
-      const sLot = parseFloat(summaryData?.lot_total) || calcLotTotal;
-      const sRate = parseFloat(summaryData?.premium_rate) || parseFloat(ri.buyer_premium_rate) || (sLot > 0 && sPrem > 0 ? +(sPrem / sLot).toFixed(4) : 0);
-      const taxRate = parseFloat(ri.tax_rate) || (sLot > 0 && sTax > 0 && (sLot + sPrem + sHandling) > 0 ? +(sTax / (sLot + sPrem + sHandling)).toFixed(4) : 0.13);
-      
-      // Use the ACTUAL lot total from summary (not our possibly-incomplete sum)
-      const lotTotal = sLot;
-      const premiumRate = sRate;
-      const premiumTotal = sPrem || +(lotTotal * premiumRate).toFixed(2);
-      const actualHandling = sHandling;
-      const taxTotal = sTax || +((lotTotal + premiumTotal + actualHandling) * taxRate).toFixed(2);
-      const grandTotal = sGrand || +(lotTotal + premiumTotal + actualHandling + taxTotal).toFixed(2);
-      
-      // Proportional cost: distribute ALL overhead (premium+handling+tax) per item based on hammer_price ratio
-      const overhead = grandTotal - lotTotal;
-      const perItemHandling = allItems.length > 0 && actualHandling > 0 ? actualHandling / allItems.length : 0;
-      
-      // Warn if items seem missing
-      if (calcLotTotal > 0 && lotTotal > 0 && Math.abs(calcLotTotal - lotTotal) > 2) {
-        notify('info', `Note: Detected $${calcLotTotal.toFixed(2)} in lots vs invoice shows $${lotTotal.toFixed(2)} — ${Math.abs(allItems.length - (parseFloat(summaryData?.total_quantity)||allItems.length))} items may need manual check`);
-      }
+      // ── Get rates from summary page or invoice header — each invoice is unique ──
+      const premiumRate = parseFloat(summaryData?.premium_rate) || parseFloat(ri.buyer_premium_rate) || 0;
+      const taxRate = parseFloat(ri.tax_rate) || (summaryData?.tax_total && summaryData?.lot_total ? +(parseFloat(summaryData.tax_total) / (parseFloat(summaryData.lot_total) + parseFloat(summaryData.premium_total || 0) + parseFloat(summaryData.handling_fee_total || 0))).toFixed(4) : 0.13);
+
+      // ── Calculate each item individually — no grand total distribution ──
+      let lotTotal = 0, premiumTotal = 0, handlingTotal = 0, taxTotal = 0, grandTotal = 0;
+      const rows_pre = allItems.map(it => {
+        const hp = parseFloat(it.hammer_price) || 0;
+        const handling = parseFloat(it.handling_fee) || 0;
+        const premAmt = +(hp * premiumRate).toFixed(2);
+        const taxable = +(hp + premAmt + handling).toFixed(2);
+        const taxAmt = +(taxable * taxRate).toFixed(2);
+        const totalCost = +(hp + premAmt + handling + taxAmt).toFixed(2);
+        lotTotal += hp; premiumTotal += premAmt; handlingTotal += handling; taxTotal += taxAmt; grandTotal += totalCost;
+        return { it, hp, handling, premAmt, taxAmt, totalCost };
+      });
+      lotTotal = +lotTotal.toFixed(2); premiumTotal = +premiumTotal.toFixed(2); handlingTotal = +handlingTotal.toFixed(2); taxTotal = +taxTotal.toFixed(2); grandTotal = +grandTotal.toFixed(2);
 
       const dup = await db.findDuplicateInvoice(ri.invoice_number, ri.auction_house, grandTotal, ri.date, pages[0].fileName);
       if (dup) { setUploadBusy(false); if (fileRef.current) fileRef.current.value = ''; notify('err', `⚠️ Duplicate! "${dup.auction_house || ''} #${dup.invoice_number || ''}" exists.`); return; }
@@ -224,18 +212,12 @@ export default function App() {
         date: ri.date, auction_house: ri.auction_house, invoice_number: ri.invoice_number, event_description: ri.event_description,
         payment_method: ri.payment_method, payment_status: ri.payment_status || 'Due', pickup_location: ri.pickup_location,
         buyer_premium_rate: premiumRate, tax_rate: taxRate,
-        lot_total: +lotTotal.toFixed(2), premium_total: +premiumTotal.toFixed(2), tax_total: +taxTotal.toFixed(2),
-        other_fees_total: +actualHandling.toFixed(2), other_fees_labels: actualHandling > 0 ? 'Handling Fee' : '',
-        grand_total: +grandTotal.toFixed(2),
+        lot_total: lotTotal, premium_total: premiumTotal, tax_total: taxTotal,
+        other_fees_total: handlingTotal, other_fees_labels: handlingTotal > 0 ? 'Handling Fee' : '',
+        grand_total: grandTotal,
         file_name: pages[0].fileName, file_type: pages[0].fileType, file_path: filePath, item_count: allItems.length
       });
-      const rows = allItems.map(it => {
-        const hp = parseFloat(it.hammer_price) || 0;
-        const handling = parseFloat(it.handling_fee) || +perItemHandling.toFixed(2);
-        const premAmt = +(hp * premiumRate).toFixed(2);
-        const taxAmt = +((hp + premAmt + handling) * taxRate).toFixed(2);
-        // Use proportional distribution: this item's share of grand total
-        const totalCost = lotTotal > 0 && grandTotal > 0 ? +(hp + (overhead * hp / lotTotal)).toFixed(2) : +(hp + premAmt + handling + taxAmt).toFixed(2);
+      const rows = rows_pre.map(({ it, hp, handling, premAmt, taxAmt, totalCost }) => {
         return {
           invoice_id: newInv.id, lot_number: it.lot_number, title: it.title, description: it.description, quantity: it.quantity || 1,
           hammer_price: hp, premium_rate: premiumRate, tax_rate: taxRate, premium_amount: premAmt, subtotal: +(hp + premAmt).toFixed(2), tax_amount: taxAmt,
@@ -812,118 +794,57 @@ export default function App() {
 
           {/* MANUAL RETURN TAB */}
           {returnTab==='manual'&&<>
-            <p style={{fontSize:12,color:'var(--text-muted)',marginBottom:10}}>Create a return report manually — enter invoice details and add items with lot numbers and photos.</p>
-            {/* Invoice header */}
-            <div style={{...S.card,padding:14,marginBottom:12}}>
-              <p style={{...S.label,marginBottom:6}}>INVOICE DETAILS</p>
-              <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:8}}>
-                <div><label style={S.label}>Invoice #</label><input style={S.inp} placeholder="e.g. 71600" value={manualReturn.invoiceNumber} onChange={e=>setManualReturn({...manualReturn,invoiceNumber:e.target.value})}/></div>
-                <div><label style={S.label}>Vendor</label><input style={S.inp} placeholder="e.g. Ruito Trading" value={manualReturn.vendor} onChange={e=>setManualReturn({...manualReturn,vendor:e.target.value})}/></div>
-                <div><label style={S.label}>Bid Date</label><input style={S.inp} type="date" value={manualReturn.bidDate} onChange={e=>setManualReturn({...manualReturn,bidDate:e.target.value})}/></div>
-                <div><label style={S.label}>Invoice Total</label><input style={S.inp} type="number" step="0.01" placeholder="$0.00" value={manualReturn.invoiceTotal} onChange={e=>setManualReturn({...manualReturn,invoiceTotal:e.target.value})}/></div>
-              </div>
+            {/* Invoice header — shared across all items */}
+            <div style={{...S.card,padding:14,marginBottom:12,background:'#FFF7ED',border:'1px solid #C2410C'}}>
+              <p style={{fontSize:13,fontWeight:700,color:'#C2410C',marginBottom:8}}>Invoice Details</p>
+              <label style={S.label}>Invoice #</label>
+              <input style={S.inp} placeholder="e.g. 71600" value={manualReturn.invoiceNumber} onChange={e=>setManualReturn({...manualReturn,invoiceNumber:e.target.value})}/>
+              <label style={S.label}>Vendor Name</label>
+              <input style={S.inp} placeholder="e.g. Ruito Trading Inc." value={manualReturn.vendor} onChange={e=>setManualReturn({...manualReturn,vendor:e.target.value})}/>
+              <label style={S.label}>Date</label>
+              <input style={S.inp} type="date" value={manualReturn.bidDate} onChange={e=>setManualReturn({...manualReturn,bidDate:e.target.value})}/>
             </div>
-            {/* Add items — single or batch */}
-            <div style={{display:'flex',gap:8,marginBottom:12}}>
-              <button style={{...S.btn1,flex:1,fontSize:13}} onClick={()=>setManualReturnItems(prev=>[...prev,{id:'mr_'+Date.now(),lotNumber:'',title:'',amount:'',reason:'',photos:[]}])}>+ Add 1</button>
-              <button style={{...S.btn2,flex:1,fontSize:13}} onClick={()=>{const b=[];for(let x=0;x<5;x++)b.push({id:'mr_'+Date.now()+x,lotNumber:'',title:'',amount:'',reason:'',photos:[]});setManualReturnItems(prev=>[...prev,...b]);}}>+ Add 5</button>
-              <button style={{...S.btn2,flex:1,fontSize:13}} onClick={()=>{const b=[];for(let x=0;x<10;x++)b.push({id:'mr_'+Date.now()+x,lotNumber:'',title:'',amount:'',reason:'',photos:[]});setManualReturnItems(prev=>[...prev,...b]);}}>+ Add 10</button>
+            <div style={{display:'flex',gap:8,marginBottom:10}}>
+              <button style={{...S.btn1,flex:1,fontSize:13}} onClick={()=>setManualReturnItems(p=>[...p,{id:'mr_'+Date.now(),lotNumber:'',title:'',photos:[]}])}>+ Add 1</button>
+              <button style={{...S.btn2,flex:1,fontSize:13}} onClick={()=>{const b=[];for(let x=0;x<5;x++)b.push({id:'mr_'+Date.now()+'_'+x,lotNumber:'',title:'',photos:[]});setManualReturnItems(p=>[...p,...b]);}}>+ Add 5</button>
+              <button style={{...S.btn2,flex:1,fontSize:13}} onClick={()=>{const b=[];for(let x=0;x<10;x++)b.push({id:'mr_'+Date.now()+'_'+x,lotNumber:'',title:'',photos:[]});setManualReturnItems(p=>[...p,...b]);}}>+ Add 10</button>
             </div>
-            {manualReturnItems.length>0&&<p style={{fontSize:13,fontWeight:700,marginBottom:8,color:'#C2410C'}}>{manualReturnItems.length} item{manualReturnItems.length>1?'s':''} · Return value: {fmt(manualReturnItems.reduce((s,i)=>s+parseFloat(i.amount||0),0))}</p>}
-            {/* Items */}
-            {manualReturnItems.map((item,i)=><div key={item.id} style={{...S.card,marginBottom:8,borderLeft:'3px solid #C2410C',padding:'12px 14px'}}>
-              <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:8}}>
-                <p style={{fontSize:14,fontWeight:700}}>Item {i+1}</p>
-                <button style={{background:'none',border:'none',color:'var(--red)',fontSize:16,cursor:'pointer'}} onClick={()=>setManualReturnItems(prev=>prev.filter((_,j)=>j!==i))}>✕</button>
+            {manualReturnItems.length>0&&<p style={{fontSize:13,fontWeight:700,color:'#C2410C',marginBottom:8}}>{manualReturnItems.length} item{manualReturnItems.length!==1?'s':''} for return</p>}
+            {manualReturnItems.map((item,i)=><div key={item.id} style={{...S.card,marginBottom:8,borderLeft:'3px solid #C2410C',padding:'10px 12px'}}>
+              <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:4}}>
+                <p style={{fontSize:13,fontWeight:700}}>#{i+1} — Inv #{manualReturn.invoiceNumber||'?'} · {manualReturn.vendor||'?'}</p>
+                <button style={{background:'none',border:'none',color:'var(--red)',fontSize:18,cursor:'pointer',padding:'0 4px'}} onClick={()=>setManualReturnItems(p=>p.filter((_,j)=>j!==i))}>✕</button>
               </div>
-              <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:6,marginBottom:6}}>
-                <div><label style={S.label}>Lot/Unit #</label><input style={S.inp} placeholder="e.g. 1368" value={item.lotNumber} onChange={e=>{const v=[...manualReturnItems];v[i]={...v[i],lotNumber:e.target.value};setManualReturnItems(v);}}/></div>
-                <div><label style={S.label}>Amount</label><input style={S.inp} type="number" step="0.01" placeholder="$0.00" value={item.amount} onChange={e=>{const v=[...manualReturnItems];v[i]={...v[i],amount:e.target.value};setManualReturnItems(v);}}/></div>
+              <div style={{display:'flex',gap:8,marginBottom:6}}>
+                <div style={{flex:1}}><label style={S.label}>Lot #</label><input style={S.inp} placeholder="Lot number" value={item.lotNumber} onChange={e=>{const v=[...manualReturnItems];v[i]={...v[i],lotNumber:e.target.value};setManualReturnItems(v);}}/></div>
+                <div style={{flex:2}}><label style={S.label}>Item Name</label><input style={S.inp} placeholder="Product name" value={item.title} onChange={e=>{const v=[...manualReturnItems];v[i]={...v[i],title:e.target.value};setManualReturnItems(v);}}/></div>
               </div>
-              <label style={S.label}>Product Name</label>
-              <input style={{...S.inp,marginBottom:6}} placeholder="Product description" value={item.title} onChange={e=>{const v=[...manualReturnItems];v[i]={...v[i],title:e.target.value};setManualReturnItems(v);}}/>
-              <label style={S.label}>Reason</label>
-              <input style={{...S.inp,marginBottom:6}} placeholder="Reason for return" value={item.reason} onChange={e=>{const v=[...manualReturnItems];v[i]={...v[i],reason:e.target.value};setManualReturnItems(v);}}/>
-              {/* Photos */}
-              {item.photos.length>0&&<div style={{display:'flex',gap:4,overflowX:'auto',marginBottom:6}}>{item.photos.map((p,pi)=><div key={pi} style={{position:'relative',flexShrink:0}}><img src={p} alt="" style={{width:52,height:52,borderRadius:8,objectFit:'cover',border:'2px solid #C2410C'}}/><button onClick={()=>{const v=[...manualReturnItems];v[i]={...v[i],photos:v[i].photos.filter((_,j)=>j!==pi)};setManualReturnItems(v);}} style={{position:'absolute',top:-4,right:-4,width:18,height:18,borderRadius:9,background:'var(--red)',color:'#fff',border:'none',fontSize:10,cursor:'pointer',display:'flex',alignItems:'center',justifyContent:'center'}}>✕</button></div>)}</div>}
-              <label role="button" style={{...S.chip,background:'#FFF7ED',color:'#C2410C',fontWeight:600,fontSize:12,cursor:'pointer',display:'inline-flex',alignItems:'center',gap:4}}><input type="file" accept="image/*" multiple onChange={async(e)=>{
-                const files=Array.from(e.target.files||[]);if(!files.length)return;
-                const dataUrls=[];
-                for(const f of files){const dataUrl=await new Promise(res=>{const r=new FileReader();r.onload=()=>res(r.result);r.readAsDataURL(f);});dataUrls.push(dataUrl);}
-                const v=[...manualReturnItems];v[i]={...v[i],photos:[...v[i].photos,...dataUrls]};setManualReturnItems(v);
-              }} style={{display:'none'}}/>📷 Photos ({item.photos.length})</label>
+              {item.photos.length>0&&<div style={{display:'flex',gap:4,overflowX:'auto',marginBottom:6,paddingBottom:2}}>{item.photos.map((p,pi)=><div key={pi} style={{position:'relative',flexShrink:0}}><img src={p} alt="" style={{width:64,height:64,borderRadius:8,objectFit:'cover',border:'2px solid #C2410C'}}/><button onClick={()=>{const v=[...manualReturnItems];v[i]={...v[i],photos:v[i].photos.filter((_,j)=>j!==pi)};setManualReturnItems(v);}} style={{position:'absolute',top:-5,right:-5,width:20,height:20,borderRadius:10,background:'#DC2626',color:'#fff',border:'none',fontSize:12,cursor:'pointer',display:'flex',alignItems:'center',justifyContent:'center'}}>✕</button></div>)}</div>}
+              <label role="button" style={{...S.chip,background:'#FFF7ED',color:'#C2410C',fontWeight:700,fontSize:12,cursor:'pointer',display:'inline-flex',alignItems:'center',gap:4}}><input type="file" accept="image/*" multiple onChange={async(e)=>{const files=Array.from(e.target.files||[]);if(!files.length)return;const compressed=[];for(const f of files){const du=await new Promise(res=>{const img=new Image();const rd=new FileReader();rd.onload=()=>{img.onload=()=>{const c=document.createElement('canvas');const mx=400;let w=img.width,h=img.height;if(w>mx||h>mx){if(w>h){h=h*(mx/w);w=mx;}else{w=w*(mx/h);h=mx;}}c.width=w;c.height=h;c.getContext('2d').drawImage(img,0,0,w,h);res(c.toDataURL('image/jpeg',0.7));};img.src=rd.result;};rd.readAsDataURL(f);});compressed.push(du);}const v=[...manualReturnItems];v[i]={...v[i],photos:[...v[i].photos,...compressed]};setManualReturnItems(v);}} style={{display:'none'}}/>📷 Add Photos ({item.photos.length})</label>
             </div>)}
-            {/* Print */}
-            {manualReturnItems.length>0&&<div style={{display:'flex',flexDirection:'column',gap:8,marginTop:12}}>
-              <button style={{...S.btn1,width:'100%',background:'#C2410C'}} onClick={()=>{
-                const mr=manualReturn;const items=manualReturnItems;
-                const ihtml=items.map(item=>`<div class="item"><h2>${item.title||'Untitled'}</h2><table><tr><td><b>Lot/Unit #</b></td><td>${item.lotNumber||'—'}</td></tr><tr><td><b>Invoice #</b></td><td>${mr.invoiceNumber||'—'}</td></tr><tr><td><b>Vendor</b></td><td>${mr.vendor||'—'}</td></tr><tr><td><b>Bid Date</b></td><td>${mr.bidDate||'—'}</td></tr><tr><td><b>Amount</b></td><td>$${parseFloat(item.amount||0).toFixed(2)}</td></tr></table>${item.reason?`<div class="reason"><b>Reason:</b> ${item.reason}</div>`:''}${item.photos.length>0?`<p class="pl">Photos (${item.photos.length})</p><div class="photos">${item.photos.map(p=>`<img src="${p}"/>`).join('')}</div>`:''}</div>`).join('');
-                const html=`<!DOCTYPE html><html><head><meta charset="utf-8"/><title>Return Report</title><style>@page{size:A4 portrait;margin:15mm}*{margin:0;padding:0;box-sizing:border-box}body{font-family:-apple-system,Arial,sans-serif;color:#1a1a1a;-webkit-print-color-adjust:exact}h1{font-size:20pt;text-align:center;margin-bottom:3mm;padding-bottom:3mm;border-bottom:2px solid #333}.meta{text-align:center;color:#666;font-size:10pt;margin-bottom:4mm}.inv-hdr{border:1.5px solid #333;border-radius:3mm;padding:5mm;margin-bottom:6mm}.inv-hdr table{width:100%;font-size:11pt;border-collapse:collapse}.inv-hdr td{padding:2mm 3mm;border-bottom:1px solid #eee}.inv-hdr td:first-child{width:130px;color:#666;font-weight:600}.item{border:1.5px solid #ddd;border-radius:3mm;padding:5mm;margin-bottom:5mm;page-break-inside:avoid}.item h2{font-size:13pt;margin-bottom:2mm}table{width:100%;font-size:10pt;border-collapse:collapse;margin-bottom:2mm}td{padding:1.5mm 3mm;border-bottom:1px solid #eee}td:first-child{width:100px;color:#666}.reason{background:#FFF7ED;border:1px solid #FB923C;border-radius:2mm;padding:3mm;margin:2mm 0;font-size:10pt}.pl{font-size:9pt;font-weight:600;margin:2mm 0;color:#C2410C}.photos{display:flex;gap:2mm;flex-wrap:wrap}.photos img{width:40mm;height:40mm;object-fit:cover;border-radius:2mm;border:1px solid #ddd}</style></head><body><h1>Return Report</h1><p class="meta">${items.length} item(s) · ${new Date().toLocaleDateString('en-CA')}</p><div class="inv-hdr"><table><tr><td>Invoice #</td><td><b>${mr.invoiceNumber||'—'}</b></td></tr><tr><td>Vendor</td><td>${mr.vendor||'—'}</td></tr><tr><td>Bid Date</td><td>${mr.bidDate||'—'}</td></tr><tr><td>Invoice Total</td><td><b>$${parseFloat(mr.invoiceTotal||0).toFixed(2)}</b></td></tr><tr><td>Items Returned</td><td>${items.length}</td></tr><tr><td>Return Value</td><td><b>$${items.reduce((s,i)=>s+parseFloat(i.amount||0),0).toFixed(2)}</b></td></tr></table></div>${ihtml}</body></html>`;
-                const w=window.open('','_blank','width=800,height=1000');w.document.write(html);w.document.close();
-                const checkAndPrint=()=>{const imgs=w.document.querySelectorAll('img');let allLoaded=true;imgs.forEach(img=>{if(!img.complete)allLoaded=false;});if(allLoaded||imgs.length===0){setTimeout(()=>{w.focus();w.print();},400);}else{setTimeout(checkAndPrint,200);}};setTimeout(checkAndPrint,300);
-              }}>🖨 Print Return Report</button>
-              <button style={{...S.btn1,width:'100%',background:'var(--green)'}} onClick={()=>{
-                const cluster={id:uid(),date:new Date().toISOString(),manual:true,invoiceNumber:manualReturn.invoiceNumber,vendor:manualReturn.vendor,bidDate:manualReturn.bidDate,invoiceTotal:manualReturn.invoiceTotal,items:manualReturnItems.map(i=>({id:i.id,title:i.title,lot_number:i.lotNumber,reason:i.reason,total_cost:i.amount,photos:i.photos,photoCount:i.photos.length}))};
-                const updated=[cluster,...savedReturns];
-                try{localStorage.setItem('av_returns',JSON.stringify(updated));setSavedReturns(updated);}
-                catch(e){
-                  // Too large with photos — save without photos
-                  const lite={...cluster,items:cluster.items.map(i=>({...i,photos:[],photoCount:i.photoCount}))};
-                  const updLite=[lite,...savedReturns];
-                  try{localStorage.setItem('av_returns',JSON.stringify(updLite));setSavedReturns(updLite);notify('info','Saved without photos (storage full). Print first to keep photos.');}
-                  catch(e2){notify('err','Cannot save — too much data. Print first, then clear.');}
-                }
-                setManualReturnItems([]);setManualReturn({invoiceNumber:'',bidDate:'',invoiceTotal:'',vendor:''});notify('ok','✅ Manual return saved');
-              }}>💾 Save Return</button>
-              <button style={{...S.btn2,width:'100%',color:'var(--red)'}} onClick={()=>{if(confirm('Clear all?')){setManualReturnItems([]);}}}>🗑 Clear</button>
+            {manualReturnItems.length>0&&<div style={{display:'flex',flexDirection:'column',gap:8,marginTop:14}}>
+              <button style={{...S.btn1,width:'100%',background:'#C2410C',fontSize:15,padding:'14px'}} onClick={()=>{const mr=manualReturn;const its=manualReturnItems.filter(i=>i.lotNumber||i.title);if(!its.length){notify('err','Add at least one item');return;}const ihtml=its.map((item,idx)=>`<div class="item"><div class="ih"><span class="num">#${idx+1}</span><h2>${item.title||'Lot '+item.lotNumber}</h2></div><table><tr><td>Lot #</td><td><b>${item.lotNumber||'—'}</b></td></tr><tr><td>Invoice #</td><td>${mr.invoiceNumber||'—'}</td></tr><tr><td>Vendor</td><td>${mr.vendor||'—'}</td></tr><tr><td>Date</td><td>${mr.bidDate||'—'}</td></tr></table>${item.photos.length>0?`<div class="photos">${item.photos.map(p=>`<img src="${p}"/>`).join('')}</div>`:''}</div>`).join('');const html=`<!DOCTYPE html><html><head><meta charset="utf-8"/><title>Return — ${mr.vendor||''} #${mr.invoiceNumber||''}</title><style>@page{size:A4 portrait;margin:12mm}*{margin:0;padding:0;box-sizing:border-box}body{font-family:-apple-system,Arial,sans-serif;color:#1a1a1a;-webkit-print-color-adjust:exact;print-color-adjust:exact}h1{font-size:18pt;text-align:center;margin-bottom:2mm}h1 span{color:#C2410C}.meta{text-align:center;color:#666;font-size:10pt;margin-bottom:4mm}.hdr{border:2px solid #C2410C;border-radius:3mm;padding:5mm;margin-bottom:6mm}.hdr table{width:100%;font-size:11pt;border-collapse:collapse}.hdr td{padding:2mm 3mm;border-bottom:1px solid #eee}.hdr td:first-child{width:120px;color:#666;font-weight:600}.item{border:1.5px solid #ddd;border-radius:3mm;padding:4mm;margin-bottom:4mm;page-break-inside:avoid}.ih{display:flex;align-items:center;gap:3mm;margin-bottom:2mm}.num{background:#C2410C;color:#fff;padding:1mm 3mm;border-radius:2mm;font-size:9pt;font-weight:700}.item h2{font-size:12pt}table{width:100%;font-size:10pt;border-collapse:collapse;margin-bottom:2mm}td{padding:1.5mm 3mm;border-bottom:1px solid #eee}td:first-child{width:80px;color:#888}.photos{display:flex;gap:3mm;flex-wrap:wrap;margin-top:2mm}.photos img{width:38mm;height:38mm;object-fit:cover;border-radius:2mm;border:1px solid #ddd}</style></head><body><h1><span>↩</span> Return Report</h1><p class="meta">${its.length} item(s) · ${new Date().toLocaleDateString('en-CA')}</p><div class="hdr"><table><tr><td>Invoice #</td><td><b>${mr.invoiceNumber||'—'}</b></td></tr><tr><td>Vendor</td><td><b>${mr.vendor||'—'}</b></td></tr><tr><td>Date</td><td>${mr.bidDate||'—'}</td></tr></table></div>${ihtml}</body></html>`;const w=window.open('','_blank','width=800,height=1000');w.document.write(html);w.document.close();const wp=()=>{const imgs=w.document.querySelectorAll('img');let ok=true;imgs.forEach(im=>{if(!im.complete)ok=false;});if(ok||imgs.length===0)setTimeout(()=>{w.focus();w.print();},300);else setTimeout(wp,200);};setTimeout(wp,300);}}>🖨 Print ({manualReturnItems.filter(i=>i.lotNumber||i.title).length} items)</button>
+              <button style={{...S.btn1,width:'100%',background:'var(--green)',fontSize:15,padding:'14px'}} onClick={()=>{const its=manualReturnItems.filter(i=>i.lotNumber||i.title);if(!its.length){notify('err','Add at least one item');return;}const cluster={id:uid(),date:new Date().toISOString(),manual:true,invoiceNumber:manualReturn.invoiceNumber,vendor:manualReturn.vendor,bidDate:manualReturn.bidDate,items:its.map(i=>({id:i.id,title:i.title,lot_number:i.lotNumber,photos:i.photos}))};const updated=[cluster,...savedReturns];try{localStorage.setItem('av_returns',JSON.stringify(updated));setSavedReturns(updated);setManualReturnItems([]);setManualReturn({invoiceNumber:'',bidDate:'',invoiceTotal:'',vendor:''});notify('ok',`✅ Saved — ${its.length} items`);}catch(e){const lite={...cluster,items:cluster.items.map(i=>({...i,photos:[]}))};const u2=[lite,...savedReturns];try{localStorage.setItem('av_returns',JSON.stringify(u2));setSavedReturns(u2);setManualReturnItems([]);setManualReturn({invoiceNumber:'',bidDate:'',invoiceTotal:'',vendor:''});notify('info','Saved without photos (storage full)');}catch(e2){notify('err','Storage full — print first');}}
+              }}>💾 Save</button>
+              <button style={{...S.btn2,width:'100%',color:'var(--red)'}} onClick={()=>{if(confirm('Clear all?'))setManualReturnItems([]);}}>🗑 Clear</button>
             </div>}
           </>}
 
           {/* SAVED RETURNS TAB */}
           {returnTab==='saved'&&<>
-            {savedReturns.length===0?<Empty text="No saved return requests"/>:savedReturns.map((cluster,ci)=><div key={cluster.id} className="fade-up" style={{...S.card,marginBottom:10,animationDelay:`${ci*20}ms`,borderLeft:'3px solid #C2410C'}}>
+            {savedReturns.length===0?<Empty text="No saved returns"/>:savedReturns.map((cluster,ci)=><div key={cluster.id} className="fade-up" style={{...S.card,marginBottom:10,animationDelay:`${ci*20}ms`,borderLeft:'3px solid #C2410C'}}>
               <div style={{padding:'14px 16px'}}>
-                <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',marginBottom:8}}>
-                  <div><p style={{fontSize:14,fontWeight:700}}>Return #{ci+1} — {cluster.items.length} item{cluster.items.length>1?'s':''}</p><p style={{fontSize:12,color:'var(--text-muted)'}}>{fmtDate(cluster.date)}</p></div>
+                <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',marginBottom:6}}>
+                  <div><p style={{fontSize:15,fontWeight:700}}>{cluster.vendor||'Return'} #{cluster.invoiceNumber||ci+1}</p><p style={{fontSize:12,color:'var(--text-muted)'}}>{fmtDate(cluster.bidDate||cluster.date)} · {cluster.items.length} item{cluster.items.length!==1?'s':''}</p></div>
                   <button style={{...S.chip,color:'var(--red)',fontSize:11}} onClick={()=>deleteReturnRequest(cluster.id)}>🗑</button>
                 </div>
-                <div style={{display:'flex',gap:6,flexWrap:'wrap',marginBottom:6}}>
-                  <span style={{fontSize:12,fontWeight:700,color:'var(--accent)'}}>{fmt(cluster.items.reduce((s,i)=>s+parseFloat(i.total_cost||0),0))} total</span>
-                </div>
-                {cluster.items.map((item,ii)=><div key={item.id+ii} style={{padding:'8px 0',borderTop:'1px solid var(--border-light)'}}>
-                  <div style={{display:'flex',gap:8,alignItems:'center'}}>
-                    {(()=>{const ph=itemPhotos[item.id]||[];return ph[0]?.url?<img src={ph[0].url} alt="" style={{width:36,height:36,borderRadius:6,objectFit:'cover',flexShrink:0}}/>:null;})()}
-                    <div style={{flex:1,minWidth:0}}>
-                      <p style={{fontSize:13,fontWeight:600}}>{item.title}</p>
-                      <p style={{fontSize:11,color:'var(--text-muted)'}}>Lot #{item.lot_number||'—'} · {item.auction_house} · {fmt(item.total_cost)}</p>
-                    </div>
-                  </div>
-                  {item.reason&&<p style={{fontSize:12,color:'#C2410C',fontStyle:'italic',marginTop:2}}>Reason: {item.reason}</p>}
+                {cluster.items.map((item,ii)=><div key={ii} style={{display:'flex',gap:8,padding:'6px 0',borderTop:'1px solid var(--border-light)',alignItems:'center'}}>
+                  {item.photos?.length>0?<img src={item.photos[0]} alt="" style={{width:40,height:40,borderRadius:6,objectFit:'cover',flexShrink:0}}/>:<div style={{width:40,height:40,borderRadius:6,background:'var(--bg-surface)',flexShrink:0,display:'flex',alignItems:'center',justifyContent:'center',fontSize:14}}>📷</div>}
+                  <div style={{flex:1}}><p style={{fontSize:13,fontWeight:600}}>{item.title||'—'}</p><p style={{fontSize:11,color:'var(--text-muted)'}}>Lot #{item.lot_number||'—'}{item.photos?.length>0?` · ${item.photos.length} photo${item.photos.length>1?'s':''}`:''}</p></div>
                 </div>)}
-                {/* Action buttons */}
-                <div style={{display:'flex',gap:6,marginTop:10,flexWrap:'wrap'}}>
-                  <button style={{...S.chip,background:'var(--accent-light)',color:'var(--accent)',fontWeight:700,fontSize:11}} onClick={()=>{
-                    // Reload items from current data
-                    const loaded = cluster.items.map(ci => items.find(i => i.id === ci.id) || sold.find(s => s.id === ci.id) || ci).filter(Boolean);
-                    setReturnItems(loaded);
-                    const reasons = {}; cluster.items.forEach(ci => { if (ci.reason) reasons[ci.id] = ci.reason; }); setReturnReasons(reasons);
-                    loaded.forEach(i => loadPhotos(i.id));
-                    setReturnTab('new'); notify('ok', 'Loaded — edit and print');
-                  }}>✏️ Reopen & Edit</button>
-                  <button style={{...S.chip,background:'#FFF7ED',color:'#C2410C',fontWeight:700,fontSize:11}} onClick={async ()=>{
-                    const loaded = cluster.items.map(ci => items.find(i => i.id === ci.id) || sold.find(s => s.id === ci.id) || ci).filter(Boolean);
-                    setReturnItems(loaded);
-                    const reasons = {}; cluster.items.forEach(ci => { if (ci.reason) reasons[ci.id] = ci.reason; }); setReturnReasons(reasons);
-                    for (const i of loaded) await loadPhotos(i.id);
-                    await generateReturnPDF(true, printIncludeInvoice);
-                  }}>🖨 Print With Details</button>
-                  <button style={{...S.chip,fontSize:11}} onClick={async ()=>{
-                    const loaded = cluster.items.map(ci => items.find(i => i.id === ci.id) || sold.find(s => s.id === ci.id) || ci).filter(Boolean);
-                    setReturnItems(loaded);
-                    const reasons = {}; cluster.items.forEach(ci => { if (ci.reason) reasons[ci.id] = ci.reason; }); setReturnReasons(reasons);
-                    for (const i of loaded) await loadPhotos(i.id);
-                    await generateReturnPDF(false, printIncludeInvoice);
-                  }}>🖨 Simple</button>
+                <div style={{display:'flex',gap:6,marginTop:10}}>
+                  <button style={{...S.chip,background:'var(--accent-light)',color:'var(--accent)',fontWeight:700,fontSize:12}} onClick={()=>{setManualReturn({invoiceNumber:cluster.invoiceNumber||'',vendor:cluster.vendor||'',bidDate:cluster.bidDate||'',invoiceTotal:''});setManualReturnItems(cluster.items.map(i=>({id:i.id||'mr_'+Date.now(),lotNumber:i.lot_number||'',title:i.title||'',photos:i.photos||[]})));setReturnTab('manual');notify('ok','Loaded');}}>✏️ Reopen</button>
+                  <button style={{...S.chip,background:'#FFF7ED',color:'#C2410C',fontWeight:700,fontSize:12}} onClick={()=>{const mr={invoiceNumber:cluster.invoiceNumber,vendor:cluster.vendor,bidDate:cluster.bidDate};const its=cluster.items;const ihtml=its.map((item,idx)=>`<div class="item"><div class="ih"><span class="num">#${idx+1}</span><h2>${item.title||'Lot '+item.lot_number}</h2></div><table><tr><td>Lot #</td><td><b>${item.lot_number||'—'}</b></td></tr><tr><td>Invoice #</td><td>${mr.invoiceNumber||'—'}</td></tr><tr><td>Vendor</td><td>${mr.vendor||'—'}</td></tr><tr><td>Date</td><td>${mr.bidDate||'—'}</td></tr></table>${item.photos?.length>0?`<div class="photos">${item.photos.map(p=>`<img src="${p}"/>`).join('')}</div>`:''}</div>`).join('');const html=`<!DOCTYPE html><html><head><meta charset="utf-8"/><title>Return Report</title><style>@page{size:A4 portrait;margin:12mm}*{margin:0;padding:0;box-sizing:border-box}body{font-family:-apple-system,Arial,sans-serif;color:#1a1a1a;-webkit-print-color-adjust:exact;print-color-adjust:exact}h1{font-size:18pt;text-align:center;margin-bottom:2mm}h1 span{color:#C2410C}.meta{text-align:center;color:#666;font-size:10pt;margin-bottom:4mm}.hdr{border:2px solid #C2410C;border-radius:3mm;padding:5mm;margin-bottom:6mm}.hdr table{width:100%;font-size:11pt;border-collapse:collapse}.hdr td{padding:2mm 3mm;border-bottom:1px solid #eee}.hdr td:first-child{width:120px;color:#666;font-weight:600}.item{border:1.5px solid #ddd;border-radius:3mm;padding:4mm;margin-bottom:4mm;page-break-inside:avoid}.ih{display:flex;align-items:center;gap:3mm;margin-bottom:2mm}.num{background:#C2410C;color:#fff;padding:1mm 3mm;border-radius:2mm;font-size:9pt;font-weight:700}.item h2{font-size:12pt}table{width:100%;font-size:10pt;border-collapse:collapse;margin-bottom:2mm}td{padding:1.5mm 3mm;border-bottom:1px solid #eee}td:first-child{width:80px;color:#888}.photos{display:flex;gap:3mm;flex-wrap:wrap;margin-top:2mm}.photos img{width:38mm;height:38mm;object-fit:cover;border-radius:2mm;border:1px solid #ddd}</style></head><body><h1><span>↩</span> Return Report</h1><p class="meta">${its.length} item(s) · ${fmtDate(cluster.date)}</p><div class="hdr"><table><tr><td>Invoice #</td><td><b>${mr.invoiceNumber||'—'}</b></td></tr><tr><td>Vendor</td><td><b>${mr.vendor||'—'}</b></td></tr><tr><td>Date</td><td>${mr.bidDate||'—'}</td></tr></table></div>${ihtml}</body></html>`;const w=window.open('','_blank','width=800,height=1000');w.document.write(html);w.document.close();const wp=()=>{const imgs=w.document.querySelectorAll('img');let ok=true;imgs.forEach(im=>{if(!im.complete)ok=false;});if(ok||imgs.length===0)setTimeout(()=>{w.focus();w.print();},300);else setTimeout(wp,200);};setTimeout(wp,300);}}>🖨 Print</button>
                 </div>
               </div>
             </div>)}
