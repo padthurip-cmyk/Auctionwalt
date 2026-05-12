@@ -233,7 +233,12 @@ export default function App() {
       if (dup) { setUploadBusy(false); if (fileRef.current) fileRef.current.value = ''; notify('err', `⚠️ Duplicate! "${dup.auction_house || ''} #${dup.invoice_number || ''}" exists.`); return; }
 
       const tempId = uid();
-      const filePath = await db.uploadInvoiceFile(tempId, pages[0].base64, pages[0].fileName, pages[0].fileType);
+      // Upload ALL pages
+      const filePaths = [];
+      for (let pi = 0; pi < pages.length; pi++) {
+        try { const fp = await db.uploadInvoiceFile(tempId + '_p' + (pi+1), pages[pi].base64, pages[pi].fileName, pages[pi].fileType); filePaths.push(fp); } catch {}
+      }
+      const filePath = filePaths.length > 1 ? JSON.stringify(filePaths) : filePaths[0] || '';
       const newInv = await db.insertInvoice({
         date: ri.date, auction_house: ri.auction_house, invoice_number: ri.invoice_number, event_description: ri.event_description,
         payment_method: ri.payment_method, payment_status: ri.payment_status || 'Due', pickup_location: ri.pickup_location,
@@ -261,7 +266,18 @@ export default function App() {
     if (fileRef.current) fileRef.current.value = '';
   }, [notify, load]);
 
-  const openInvoice = useCallback(async (inv) => { setModal({ type: 'invoiceView', data: inv }); setInvDetailTab('items'); setViewInvUrl(null); setInvPrintSelections({}); const detailItems = await db.getItemsByInvoice(inv.id); setInvDetailItems(detailItems); if (inv.file_path) setViewInvUrl(await db.getInvoiceFileUrl(inv.file_path)); const lotMap = {}; detailItems.forEach(it => { lotMap[it.id] = it.lot_number || ''; }); setInvItemLots(lotMap); for (const it of detailItems) { loadPhotos(it.id); } }, [loadPhotos]);
+  const openInvoice = useCallback(async (inv) => { setModal({ type: 'invoiceView', data: inv }); setInvDetailTab('items'); setViewInvUrl(null); setInvPrintSelections({}); const detailItems = await db.getItemsByInvoice(inv.id); setInvDetailItems(detailItems);
+    // Load all page URLs
+    if (inv.file_path) {
+      try {
+        let paths = [inv.file_path];
+        try { const parsed = JSON.parse(inv.file_path); if (Array.isArray(parsed)) paths = parsed; } catch {}
+        const urls = [];
+        for (const p of paths) { try { const u = await db.getInvoiceFileUrl(p); if (u) urls.push(u); } catch {} }
+        setViewInvUrl(urls.length === 1 ? urls[0] : urls.length > 1 ? urls : null);
+      } catch { setViewInvUrl(null); }
+    }
+    const lotMap = {}; detailItems.forEach(it => { lotMap[it.id] = it.lot_number || ''; }); setInvItemLots(lotMap); for (const it of detailItems) { loadPhotos(it.id); } }, [loadPhotos]);
   const handleInvStatus = useCallback(async (inv, st) => { await db.updateInvoice(inv.id, { payment_status: st }); await load(); notify('ok', `→ ${st}`); }, [load, notify]);
   const handleUpdateLotNumber = useCallback(async (itemId, lotNumber) => { try { await db.updateItem(itemId, { lot_number: lotNumber }); setInvDetailItems(prev => prev.map(it => it.id === itemId ? { ...it, lot_number: lotNumber } : it)); } catch (e) { notify('err', 'Failed'); } }, [notify]);
   const handleInvItemPhoto = useCallback(async (itemId, e) => {
@@ -281,7 +297,10 @@ export default function App() {
     if (includeInvoiceCopy) {
       // Fetch original invoice file
       let origFileHtml = '';
-      if (inv.file_path) { try { const url = await db.getInvoiceFileUrl(inv.file_path); if (url) { origFileHtml = `<div class="orig-file"><p class="ofl">Original Invoice</p><img src="${url}" style="width:100%;max-height:260mm;object-fit:contain;" onerror="this.parentElement.innerHTML='<p style=text-align:center;color:#999;padding:20mm>Invoice file could not be loaded for print. View it in the app under Invoice → File tab.</p>'"/></div>`; } } catch(e){} }
+      if (inv.file_path) { try {
+        let paths = [inv.file_path]; try { const parsed = JSON.parse(inv.file_path); if (Array.isArray(parsed)) paths = parsed; } catch {}
+        for (const p of paths) { const url = await db.getInvoiceFileUrl(p); if (url) { origFileHtml += `<div class="orig-file"><p class="ofl">Original Invoice</p><img src="${url}" style="width:100%;max-height:260mm;object-fit:contain;" onerror="this.parentElement.innerHTML='<p style=text-align:center;color:#999;padding:20mm>Page could not be loaded.</p>'"/></div>`; } }
+      } catch(e){} }
       invoiceCopyHtml = `<div class="page"><div class="inv-copy"><h2>Invoice Summary</h2><table>
         <tr><td>Auction House</td><td><b>${inv.auction_house||''}</b></td></tr>
         <tr><td>Invoice #</td><td>${inv.invoice_number||''}</td></tr>
@@ -474,7 +493,10 @@ export default function App() {
       for (const invId of invIds) {
         const inv = invoices.find(i => i.id === invId); if (!inv) continue;
         let origFileHtml = '';
-        if (inv.file_path) { try { const url = await db.getInvoiceFileUrl(inv.file_path); if (url) { origFileHtml = `<div class="page pb"><div class="orig-file"><p class="ofl">Original Invoice Document</p><img src="${url}" style="width:100%;max-height:265mm;object-fit:contain;" onerror="this.parentElement.innerHTML='<p style=text-align:center;color:#999;padding:20mm>Invoice file could not be loaded. View in app.</p>'"/></div></div>`; } } catch(e){} }
+        if (inv.file_path) { try {
+          let paths = [inv.file_path]; try { const parsed = JSON.parse(inv.file_path); if (Array.isArray(parsed)) paths = parsed; } catch {}
+          for (const p of paths) { const url = await db.getInvoiceFileUrl(p); if (url) { origFileHtml += `<div class="page pb"><div class="orig-file"><p class="ofl">Original Invoice</p><img src="${url}" style="width:100%;max-height:265mm;object-fit:contain;" onerror="this.parentElement.innerHTML='<p style=text-align:center;color:#999;padding:20mm>Page could not be loaded.</p>'"/></div></div>`; } }
+        } catch(e){} }
         invoiceCopyHtml += `<div class="page${invoiceCopyHtml?' pb':''}"><div class="inv-copy"><h2>Invoice — ${inv.auction_house||''}</h2><table>
           <tr><td>Invoice #</td><td>${inv.invoice_number||''}</td></tr><tr><td>Date</td><td>${inv.date||''}</td></tr><tr><td>Payment</td><td>${inv.payment_method||''} · ${inv.payment_status||''}</td></tr><tr><td>Location</td><td>${inv.pickup_location||''}</td></tr><tr><td>Items</td><td>${inv.item_count||''}</td></tr><tr><td>Lot Total</td><td>$${parseFloat(inv.lot_total||0).toFixed(2)}</td></tr><tr><td>Premium</td><td>$${parseFloat(inv.premium_total||0).toFixed(2)}</td></tr><tr><td>Tax</td><td>$${parseFloat(inv.tax_total||0).toFixed(2)}</td></tr>${parseFloat(inv.other_fees_total||0)>0?`<tr><td>${inv.other_fees_labels||'Other Fees'}</td><td>$${parseFloat(inv.other_fees_total).toFixed(2)}</td></tr>`:''}<tr><td><b>Grand Total</b></td><td><b>$${parseFloat(inv.grand_total||0).toFixed(2)}</b></td></tr>
           </table><div class="billed-to"><h3>Billed To</h3><p><b>${biz.business_name||'—'}</b></p><p>${biz.address||''}</p><p>${biz.phone||''} ${biz.email?'· '+biz.email:''}</p>${biz.hst?`<p>HST: ${biz.hst}</p>`:''}</div></div></div>${origFileHtml}`;
@@ -1014,7 +1036,11 @@ export default function App() {
           </div>
         </>)}
 
-        {invDetailTab==='original'&&(!viewInvUrl?<div style={{padding:30,textAlign:'center'}}><div style={S.spin}/></div>:modal.data.file_type?.includes('pdf')?<iframe src={viewInvUrl} style={{width:'100%',height:'55vh',borderRadius:10,border:'1px solid var(--border)'}}/>:<img src={viewInvUrl} alt="" style={{width:'100%',borderRadius:10}}/>)}
+        {invDetailTab==='original'&&(!viewInvUrl?<div style={{padding:30,textAlign:'center'}}><div style={S.spin}/></div>:
+          Array.isArray(viewInvUrl)?<div>{viewInvUrl.map((url,pi)=><div key={pi} style={{marginBottom:12}}><p style={{fontSize:12,fontWeight:600,color:'var(--text-muted)',marginBottom:4}}>Page {pi+1} of {viewInvUrl.length}</p><img src={url} alt={`Page ${pi+1}`} style={{width:'100%',borderRadius:10,border:'1px solid var(--border)'}}/></div>)}</div>
+          :modal.data.file_type?.includes('pdf')?<iframe src={viewInvUrl} style={{width:'100%',height:'55vh',borderRadius:10,border:'1px solid var(--border)'}}/>
+          :<img src={viewInvUrl} alt="" style={{width:'100%',borderRadius:10}}/>
+        )}
         <div style={{display:'flex',gap:8,marginTop:16}}><button style={{...S.btn2,flex:1}} onClick={()=>{handleInvStatus(modal.data,modal.data.payment_status==='Paid'?'Due':'Paid');closeModal();}}>{modal.data.payment_status==='Paid'?'⏳ Mark Due':'✅ Mark Paid'}</button><button style={{...S.btn2,flex:1,color:'var(--red)',borderColor:'var(--red)'}} onClick={()=>{db.deleteItemsByInvoice(modal.data.id).then(()=>db.deleteInvoice(modal.data.id)).then(load);closeModal();}}>🗑 Delete</button></div>
       </OL>}
 
