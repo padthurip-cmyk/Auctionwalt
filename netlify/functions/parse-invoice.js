@@ -10,7 +10,7 @@ export default async (req, context) => {
   try {
     const body = await req.json();
     const { base64, fileType, mode, pageNumber } = body;
-    if (!base64) return new Response(JSON.stringify({ error: 'No file data' }), { status: 400, headers: corsHeaders() });
+    if (!base64 && !body.pages?.length) return new Response(JSON.stringify({ error: 'No file data' }), { status: 400, headers: corsHeaders() });
 
     // 3 modes: "full" | "items_only" | "summary"
     const isItemsOnly = mode === 'items_only';
