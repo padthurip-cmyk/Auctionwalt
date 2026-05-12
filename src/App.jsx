@@ -158,53 +158,47 @@ export default function App() {
         if (!result?.invoice || !result?.items?.length) { setUploadBusy(false); if (fileRef.current) fileRef.current.value = ''; notify('err', 'Could not extract items. Try splitting into page photos.'); return; }
         allItems = result.items;
       } else {
-        // Process pages in batches of 3 — fits within timeout, AI sees enough context to not miss items
+        // Step 1: Get invoice header from page 1 only
+        notify('info', `Reading invoice header...`);
+        try { result = await parseInvoiceAI(pages[0].base64, pages[0].fileType); } catch (e) {}
+        if (!result?.invoice) { setUploadBusy(false); if (fileRef.current) fileRef.current.value = ''; notify('err', 'Could not read invoice header.'); return; }
+
+        // Step 2: Index ALL pages in batches of 3 using simple text extraction
         const batchSize = 3;
-        const batches = [];
-        for (let i = 0; i < pages.length; i += batchSize) batches.push(pages.slice(i, i + batchSize));
-
-        // First batch: full mode (header + items)
-        notify('info', `Batch 1/${batches.length} (pages 1-${Math.min(batchSize, pages.length)})...`);
-        try {
-          result = await parseInvoiceAllPages(batches[0]);
-        } catch (e) {
-          // If batch of 3 still fails, try page 1 alone
-          try { result = await parseInvoicePageAI(pages[0].base64, pages[0].fileType, 'full', 1); } catch (e2) {}
-        }
-        if (!result?.invoice) { setUploadBusy(false); if (fileRef.current) fileRef.current.value = ''; notify('err', 'Could not read invoice.'); return; }
-        allItems = [...(result.items || [])];
-
-        // Remaining batches: items_only
-        for (let b = 1; b < batches.length; b++) {
-          const batch = batches[b];
-          const startPage = b * batchSize + 1;
-          const endPage = Math.min(startPage + batch.length - 1, pages.length);
-          notify('info', `Batch ${b+1}/${batches.length} (pages ${startPage}-${endPage})... ${allItems.length} items`);
+        for (let i = 0; i < pages.length; i += batchSize) {
+          const batch = pages.slice(i, i + batchSize);
+          const startPage = i + 1;
+          notify('info', `Indexing pages ${startPage}-${Math.min(startPage + batch.length - 1, pages.length)}... (${allItems.length} items)`);
           try {
             const batchResult = await parseInvoiceAllPages(batch, 'index');
             if (batchResult?.items?.length) allItems = [...allItems, ...batchResult.items];
-            // Check if this batch has summary data (last batches)
-            if (batchResult?.invoice) {
-              if (batchResult.invoice.buyer_premium_rate) result.invoice.buyer_premium_rate = batchResult.invoice.buyer_premium_rate;
-              if (batchResult.invoice.grand_total) result.invoice.grand_total = batchResult.invoice.grand_total;
-              if (batchResult.invoice.lot_total) result.invoice.lot_total = batchResult.invoice.lot_total;
-              if (batchResult.invoice.premium_total) result.invoice.premium_total = batchResult.invoice.premium_total;
-              if (batchResult.invoice.handling_fee_total) result.invoice.handling_fee_total = batchResult.invoice.handling_fee_total;
-              if (batchResult.invoice.tax_total) result.invoice.tax_total = batchResult.invoice.tax_total;
-            }
-          } catch (e) {
-            // Fallback: process this batch page-by-page with index mode
-            for (let p = 0; p < batch.length; p++) {
-              try { const pr = await parseInvoicePageAI(batch[p].base64, batch[p].fileType, 'index', startPage + p); if (pr?.items?.length) allItems = [...allItems, ...pr.items]; } catch {}
+          } catch {
+            for (const pg of batch) {
+              try { const pr = await parseInvoicePageAI(pg.base64, pg.fileType, 'index', startPage); if (pr?.items?.length) allItems = [...allItems, ...pr.items]; } catch {}
             }
           }
         }
-        // Get summary from last 2 pages if not already found
-        if (!result.invoice.grand_total) {
-          for (let i = Math.max(0, pages.length - 2); i < pages.length; i++) {
-            try { const sr = await parseInvoicePageAI(pages[i].base64, pages[i].fileType, 'summary', i + 1); if (sr?.summary) { const s = sr.summary; if (s.premium_rate) result.invoice.buyer_premium_rate = s.premium_rate; if (s.grand_total) result.invoice.grand_total = s.grand_total; if (s.lot_total) result.invoice.lot_total = s.lot_total; if (s.premium_total) result.invoice.premium_total = s.premium_total; if (s.handling_fee_total) result.invoice.handling_fee_total = s.handling_fee_total; if (s.tax_total) result.invoice.tax_total = s.tax_total; } } catch {}
-          }
+
+        // Step 3: Get summary from last 2 pages
+        for (let i = Math.max(0, pages.length - 2); i < pages.length; i++) {
+          try {
+            const sr = await parseInvoicePageAI(pages[i].base64, pages[i].fileType, 'summary', i + 1);
+            if (sr?.summary) {
+              const s = sr.summary;
+              if (s.premium_rate) result.invoice.buyer_premium_rate = s.premium_rate;
+              if (s.grand_total) result.invoice.grand_total = s.grand_total;
+              if (s.lot_total) result.invoice.lot_total = s.lot_total;
+              if (s.premium_total) result.invoice.premium_total = s.premium_total;
+              if (s.handling_fee_total) result.invoice.handling_fee_total = s.handling_fee_total;
+              if (s.tax_total) result.invoice.tax_total = s.tax_total;
+            }
+          } catch {}
         }
+
+        // Deduplicate by lot_number
+        const seen = new Set();
+        allItems = allItems.filter(it => { const key = it.lot_number || it.title; if (seen.has(key)) return false; seen.add(key); return true; });
+
         if (!allItems.length) { setUploadBusy(false); if (fileRef.current) fileRef.current.value = ''; notify('err', 'No items found.'); return; }
         result.items = allItems;
       }
