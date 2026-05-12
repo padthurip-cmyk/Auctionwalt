@@ -44,33 +44,42 @@ RULES:
 - Return {"items":[]} ONLY if there are truly zero items on this page`;
 
     } else {
-      systemPrompt = `Extract the invoice header AND ALL items from this auction invoice page. Return ONLY valid JSON:
-{"invoice":{"date":"YYYY-MM-DD","auction_house":"","invoice_number":"","event_description":"","payment_method":"","payment_status":"Unpaid","pickup_location":"","buyer_premium_rate":0.00,"tax_rate":0.13},"items":[{"lot_number":"","title":"Short title","description":"","quantity":1,"hammer_price":0.00,"handling_fee":0.00}]}
+      systemPrompt = `Extract the invoice header AND ALL items from this auction invoice. This may be a multi-page invoice — extract items from EVERY page. Return ONLY valid JSON:
+{"invoice":{"date":"YYYY-MM-DD","auction_house":"","invoice_number":"","event_description":"","payment_method":"","payment_status":"Unpaid","pickup_location":"","buyer_premium_rate":0.00,"tax_rate":0.13,"lot_total":0,"premium_total":0,"handling_fee_total":0,"tax_total":0,"grand_total":0},"items":[{"lot_number":"","title":"Short title","description":"","quantity":1,"hammer_price":0.00,"handling_fee":0.00}]}
 RULES:
-- auction_house = the company name (e.g. "Ruito Trading Inc.")
+- auction_house = the company name
 - invoice_number = Invoice # shown
-- date = invoice date in YYYY-MM-DD format
-- pickup_location = any address/location shown
-- payment_status = "Paid" or "Unpaid" (look for PAID/UNPAID stamps)
-- buyer_premium_rate = if mentioned (e.g. "16% Buyer's Premium" = 0.16), otherwise 0
-- Extract EVERY item on this page. hammer_price = the extended price amount
-- "Handling Fee - 1.00" below items = handling_fee for that item`;
+- date = invoice date in YYYY-MM-DD
+- pickup_location = address shown
+- payment_status = look for PAID/UNPAID stamp
+- buyer_premium_rate = percentage as decimal (16% = 0.16). Read from summary section (e.g. "16% Buyer's Premium")
+- tax_rate = tax percentage as decimal (13% = 0.13)
+- lot_total, premium_total, handling_fee_total, tax_total, grand_total = read from the summary/totals section
+- Extract EVERY SINGLE item from ALL pages. Do NOT skip any.
+- hammer_price = the extended price for each item
+- handling_fee = "Handling Fee" amount shown below each item (e.g. 1.00)
+- Count carefully. If summary says "Total Quantity: 50" you must have 50 items.`;
     }
 
     const content = [];
-    if (fileType?.includes('pdf')) {
-      content.push({ type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: base64 } });
-    } else if (fileType?.startsWith('image/')) {
-      content.push({ type: 'image', source: { type: 'base64', media_type: fileType, data: base64 } });
-    } else {
-      content.push({ type: 'text', text: base64 });
+    
+    // Support multiple pages in one request
+    const allPages = body.pages || [{ base64, fileType }];
+    for (const pg of allPages) {
+      if (pg.fileType?.includes('pdf')) {
+        content.push({ type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: pg.base64 } });
+      } else if (pg.fileType?.startsWith('image/')) {
+        content.push({ type: 'image', source: { type: 'base64', media_type: pg.fileType, data: pg.base64 } });
+      }
     }
 
     const userMsg = isSummary
       ? 'Extract the invoice totals/summary from this page. Return ONLY JSON.'
       : isItemsOnly
         ? 'Extract ALL items and their handling fees from this page. Return ONLY JSON.'
-        : 'Extract invoice header and ALL items with handling fees. Return ONLY JSON.';
+        : allPages.length > 1
+          ? `This is a ${allPages.length}-page invoice. Extract the invoice header from page 1, ALL items from ALL pages with their handling fees, and read the summary totals from the last pages. Return ONLY JSON.`
+          : 'Extract invoice header and ALL items with handling fees. Return ONLY JSON.';
     content.push({ type: 'text', text: userMsg });
 
     const response = await fetch('https://api.anthropic.com/v1/messages', {
