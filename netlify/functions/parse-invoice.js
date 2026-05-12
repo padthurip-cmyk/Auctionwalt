@@ -43,6 +43,26 @@ RULES:
 - If this page has summary totals at the bottom (Total Extended Price, Premium, etc), still extract all items above it
 - Return {"items":[]} ONLY if there are truly zero items on this page`;
 
+    } else if (mode === 'index') {
+      // Simple line-by-line extraction — much more reliable than JSON for large invoices
+      systemPrompt = `List EVERY item/lot from these invoice pages. Output ONLY a plain text list, one item per line, in this exact format:
+LOT_NUMBER|TITLE|HAMMER_PRICE|HANDLING_FEE
+
+Example:
+1368|Garnier Ombrelle Kids Sunscreen Lotion SPF 60|5.50|1.00
+1372|Diaper Genie Max Fresh Clean Laundry Scent Diaper|14.50|1.00
+
+RULES:
+- ONE line per item. No blank lines between items.
+- LOT_NUMBER = the lot number shown (e.g. 1368)
+- TITLE = short product title (max 60 chars)
+- HAMMER_PRICE = the extended price / bid amount (number only, no $)
+- HANDLING_FEE = handling fee amount if shown below the item (number only, no $). Use 0 if none.
+- Extract EVERY SINGLE item from ALL pages. Do NOT skip any.
+- Do NOT add any headers, footers, markdown, or explanation. Just the pipe-delimited lines.
+- If a page has summary totals at the bottom, ignore them — only list actual items.
+- Count carefully. If there are 50 items, output exactly 50 lines.`;
+
     } else {
       systemPrompt = `Extract the invoice header AND ALL items from this auction invoice. This may be a multi-page invoice — extract items from EVERY page. Return ONLY valid JSON:
 {"invoice":{"date":"YYYY-MM-DD","auction_house":"","invoice_number":"","event_description":"","payment_method":"","payment_status":"Unpaid","pickup_location":"","buyer_premium_rate":0.00,"tax_rate":0.13,"lot_total":0,"premium_total":0,"handling_fee_total":0,"tax_total":0,"grand_total":0},"items":[{"lot_number":"","title":"Short title","description":"","quantity":1,"hammer_price":0.00,"handling_fee":0.00}]}
@@ -75,11 +95,15 @@ RULES:
 
     const userMsg = isSummary
       ? 'Extract the invoice totals/summary from this page. Return ONLY JSON.'
-      : isItemsOnly
-        ? 'Extract ALL items and their handling fees from this page. Return ONLY JSON.'
-        : allPages.length > 1
-          ? `This is a ${allPages.length}-page invoice. Extract the invoice header from page 1, ALL items from ALL pages with their handling fees, and read the summary totals from the last pages. Return ONLY JSON.`
-          : 'Extract invoice header and ALL items with handling fees. Return ONLY JSON.';
+      : mode === 'index'
+        ? `List EVERY item from ${allPages.length > 1 ? 'ALL ' + allPages.length + ' pages' : 'this page'}. One item per line: LOT|TITLE|PRICE|HANDLING_FEE. No headers, no markdown.`
+        : isItemsOnly
+          ? allPages.length > 1
+            ? `These are ${allPages.length} pages of an invoice. Extract ALL items and their handling fees from ALL pages. Do NOT skip any item. Return ONLY JSON.`
+            : 'Extract ALL items and their handling fees from this page. Return ONLY JSON.'
+          : allPages.length > 1
+            ? `This is a ${allPages.length}-page invoice. Extract the invoice header from page 1, ALL items from ALL pages with their handling fees, and read the summary totals from the last pages. Return ONLY JSON.`
+            : 'Extract invoice header and ALL items with handling fees. Return ONLY JSON.';
     content.push({ type: 'text', text: userMsg });
 
     const response = await fetch('https://api.anthropic.com/v1/messages', {
@@ -100,12 +124,22 @@ RULES:
     const clean = text.replace(/```json|```/g, '').trim();
 
     let parsed;
-    try {
-      parsed = JSON.parse(clean);
-    } catch {
-      parsed = recoverJSON(clean);
-      if (!parsed) {
-        return new Response(JSON.stringify({ error: 'Response was truncated. Try uploading fewer pages at once.' }), { status: 500, headers: corsHeaders() });
+    if (mode === 'index') {
+      // Parse pipe-delimited lines into items array
+      const lines = clean.split('\n').map(l => l.trim()).filter(l => l && l.includes('|'));
+      const items = lines.map(line => {
+        const parts = line.split('|').map(p => p.trim());
+        return { lot_number: parts[0] || '', title: parts[1] || '', hammer_price: parseFloat(parts[2]) || 0, handling_fee: parseFloat(parts[3]) || 0 };
+      }).filter(it => it.lot_number || it.title);
+      parsed = { items };
+    } else {
+      try {
+        parsed = JSON.parse(clean);
+      } catch {
+        parsed = recoverJSON(clean);
+        if (!parsed) {
+          return new Response(JSON.stringify({ error: 'Response was truncated. Try uploading fewer pages.' }), { status: 500, headers: corsHeaders() });
+        }
       }
     }
 
