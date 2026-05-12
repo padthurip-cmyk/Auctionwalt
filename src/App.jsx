@@ -158,31 +158,55 @@ export default function App() {
         if (!result?.invoice || !result?.items?.length) { setUploadBusy(false); if (fileRef.current) fileRef.current.value = ''; notify('err', 'Could not extract items. Try splitting into page photos.'); return; }
         allItems = result.items;
       } else {
-        // Try all pages at once first, fall back to page-by-page if it fails
-        let allAtOnceFailed = false;
-        notify('info', `Reading ${pages.length} pages...`);
-        try { result = await parseInvoiceAllPages(pages); }
-        catch (apiErr) { allAtOnceFailed = true; notify('info', 'Switching to page-by-page...'); }
-        if (!allAtOnceFailed && (!result?.invoice || !result?.items?.length)) allAtOnceFailed = true;
+        // Process pages in batches of 3 — fits within timeout, AI sees enough context to not miss items
+        const batchSize = 3;
+        const batches = [];
+        for (let i = 0; i < pages.length; i += batchSize) batches.push(pages.slice(i, i + batchSize));
 
-        if (allAtOnceFailed) {
-          // Page-by-page fallback
-          result = null;
-          notify('info', `Page 1 of ${pages.length}...`);
-          try { result = await parseInvoicePageAI(pages[0].base64, pages[0].fileType, 'full', 1); } catch (e) {}
-          if (!result?.invoice) { setUploadBusy(false); if (fileRef.current) fileRef.current.value = ''; notify('err', 'Could not read invoice header from page 1.'); return; }
-          allItems = [...(result.items || [])];
-          for (let i = 1; i < pages.length; i++) {
-            notify('info', `Page ${i+1} of ${pages.length}... (${allItems.length} items)`);
-            try { const pr = await parseInvoicePageAI(pages[i].base64, pages[i].fileType, 'items_only', i+1); if (pr?.items?.length) allItems = [...allItems, ...pr.items]; } catch {}
-            // Also try summary on last 2 pages
-            if (i >= pages.length - 2) { try { const sr = await parseInvoicePageAI(pages[i].base64, pages[i].fileType, 'summary', i+1); if (sr?.summary) { if (!result.invoice.buyer_premium_rate && sr.summary.premium_rate) result.invoice.buyer_premium_rate = sr.summary.premium_rate; if (!result.invoice.grand_total && sr.summary.grand_total) result.invoice.grand_total = sr.summary.grand_total; if (sr.summary.handling_fee_total) result.invoice.handling_fee_total = sr.summary.handling_fee_total; if (sr.summary.tax_total) result.invoice.tax_total = sr.summary.tax_total; if (sr.summary.lot_total) result.invoice.lot_total = sr.summary.lot_total; if (sr.summary.premium_total) result.invoice.premium_total = sr.summary.premium_total; } } catch {} }
-          }
-          if (!allItems.length) { setUploadBusy(false); if (fileRef.current) fileRef.current.value = ''; notify('err', 'No items found.'); return; }
-          result.items = allItems;
-        } else {
-          allItems = result.items;
+        // First batch: full mode (header + items)
+        notify('info', `Batch 1/${batches.length} (pages 1-${Math.min(batchSize, pages.length)})...`);
+        try {
+          result = await parseInvoiceAllPages(batches[0]);
+        } catch (e) {
+          // If batch of 3 still fails, try page 1 alone
+          try { result = await parseInvoicePageAI(pages[0].base64, pages[0].fileType, 'full', 1); } catch (e2) {}
         }
+        if (!result?.invoice) { setUploadBusy(false); if (fileRef.current) fileRef.current.value = ''; notify('err', 'Could not read invoice.'); return; }
+        allItems = [...(result.items || [])];
+
+        // Remaining batches: items_only
+        for (let b = 1; b < batches.length; b++) {
+          const batch = batches[b];
+          const startPage = b * batchSize + 1;
+          const endPage = Math.min(startPage + batch.length - 1, pages.length);
+          notify('info', `Batch ${b+1}/${batches.length} (pages ${startPage}-${endPage})... ${allItems.length} items`);
+          try {
+            const batchResult = await parseInvoiceAllPages(batch.map((p, i) => ({ ...p, mode: 'items_only', pageNumber: startPage + i })));
+            if (batchResult?.items?.length) allItems = [...allItems, ...batchResult.items];
+            // Check if this batch has summary data (last batches)
+            if (batchResult?.invoice) {
+              if (batchResult.invoice.buyer_premium_rate) result.invoice.buyer_premium_rate = batchResult.invoice.buyer_premium_rate;
+              if (batchResult.invoice.grand_total) result.invoice.grand_total = batchResult.invoice.grand_total;
+              if (batchResult.invoice.lot_total) result.invoice.lot_total = batchResult.invoice.lot_total;
+              if (batchResult.invoice.premium_total) result.invoice.premium_total = batchResult.invoice.premium_total;
+              if (batchResult.invoice.handling_fee_total) result.invoice.handling_fee_total = batchResult.invoice.handling_fee_total;
+              if (batchResult.invoice.tax_total) result.invoice.tax_total = batchResult.invoice.tax_total;
+            }
+          } catch (e) {
+            // Fallback: process this batch page-by-page
+            for (let p = 0; p < batch.length; p++) {
+              try { const pr = await parseInvoicePageAI(batch[p].base64, batch[p].fileType, 'items_only', startPage + p); if (pr?.items?.length) allItems = [...allItems, ...pr.items]; } catch {}
+            }
+          }
+        }
+        // Get summary from last 2 pages if not already found
+        if (!result.invoice.grand_total) {
+          for (let i = Math.max(0, pages.length - 2); i < pages.length; i++) {
+            try { const sr = await parseInvoicePageAI(pages[i].base64, pages[i].fileType, 'summary', i + 1); if (sr?.summary) { const s = sr.summary; if (s.premium_rate) result.invoice.buyer_premium_rate = s.premium_rate; if (s.grand_total) result.invoice.grand_total = s.grand_total; if (s.lot_total) result.invoice.lot_total = s.lot_total; if (s.premium_total) result.invoice.premium_total = s.premium_total; if (s.handling_fee_total) result.invoice.handling_fee_total = s.handling_fee_total; if (s.tax_total) result.invoice.tax_total = s.tax_total; } } catch {}
+          }
+        }
+        if (!allItems.length) { setUploadBusy(false); if (fileRef.current) fileRef.current.value = ''; notify('err', 'No items found.'); return; }
+        result.items = allItems;
       }
 
       const ri = result.invoice;
@@ -204,7 +228,14 @@ export default function App() {
       });
       lotTotal = +lotTotal.toFixed(2); premiumTotal = +premiumTotal.toFixed(2); handlingTotal = +handlingTotal.toFixed(2); taxTotal = +taxTotal.toFixed(2); grandTotal = +grandTotal.toFixed(2);
 
-      const dup = await db.findDuplicateInvoice(ri.invoice_number, ri.auction_house, grandTotal, ri.date, pages[0].fileName);
+      // Prefer ACTUAL invoice totals from summary page over calculated sums (some items may be missed by AI)
+      const invLotTotal = parseFloat(ri.lot_total) || lotTotal;
+      const invPremiumTotal = parseFloat(ri.premium_total) || premiumTotal;
+      const invHandlingTotal = parseFloat(ri.handling_fee_total) || handlingTotal;
+      const invTaxTotal = parseFloat(ri.tax_total) || taxTotal;
+      const invGrandTotal = parseFloat(ri.grand_total) || grandTotal;
+
+      const dup = await db.findDuplicateInvoice(ri.invoice_number, ri.auction_house, invGrandTotal, ri.date, pages[0].fileName);
       if (dup) { setUploadBusy(false); if (fileRef.current) fileRef.current.value = ''; notify('err', `⚠️ Duplicate! "${dup.auction_house || ''} #${dup.invoice_number || ''}" exists.`); return; }
 
       const tempId = uid();
@@ -213,9 +244,9 @@ export default function App() {
         date: ri.date, auction_house: ri.auction_house, invoice_number: ri.invoice_number, event_description: ri.event_description,
         payment_method: ri.payment_method, payment_status: ri.payment_status || 'Due', pickup_location: ri.pickup_location,
         buyer_premium_rate: premiumRate, tax_rate: taxRate,
-        lot_total: lotTotal, premium_total: premiumTotal, tax_total: taxTotal,
-        other_fees_total: handlingTotal, other_fees_labels: handlingTotal > 0 ? 'Handling Fee' : '',
-        grand_total: grandTotal,
+        lot_total: invLotTotal, premium_total: invPremiumTotal, tax_total: invTaxTotal,
+        other_fees_total: invHandlingTotal, other_fees_labels: invHandlingTotal > 0 ? 'Handling Fee' : '',
+        grand_total: invGrandTotal,
         file_name: pages[0].fileName, file_type: pages[0].fileType, file_path: filePath, item_count: allItems.length
       });
       const rows = rows_pre.map(({ it, hp, handling, premAmt, taxAmt, totalCost }) => {
