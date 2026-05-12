@@ -11,6 +11,18 @@ export async function parseInvoiceAI(base64, fileType) {
   } catch (err) { clearTimeout(timeout); if (err.name === 'AbortError') throw new Error('Invoice took too long. Try uploading pages separately.'); throw err; }
 }
 
+// Send ALL pages at once — Claude sees the entire invoice
+export async function parseInvoiceAllPages(pages) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 120000);
+  try {
+    const r = await fetch('/api/parse-invoice', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ pages: pages.map(p => ({ base64: p.base64, fileType: p.fileType })), mode: 'full' }), signal: controller.signal });
+    clearTimeout(timeout); const data = await r.json();
+    if (!r.ok || data.error) throw new Error(data.error || `Server error ${r.status}`);
+    return data;
+  } catch (err) { clearTimeout(timeout); if (err.name === 'AbortError') throw new Error('Invoice too large — timed out.'); throw err; }
+}
+
 export async function parseInvoicePageAI(base64, fileType, mode, pageNumber) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 90000);
