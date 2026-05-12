@@ -181,7 +181,7 @@ export default function App() {
           const endPage = Math.min(startPage + batch.length - 1, pages.length);
           notify('info', `Batch ${b+1}/${batches.length} (pages ${startPage}-${endPage})... ${allItems.length} items`);
           try {
-            const batchResult = await parseInvoiceAllPages(batch.map((p, i) => ({ ...p, mode: 'items_only', pageNumber: startPage + i })));
+            const batchResult = await parseInvoiceAllPages(batch, 'index');
             if (batchResult?.items?.length) allItems = [...allItems, ...batchResult.items];
             // Check if this batch has summary data (last batches)
             if (batchResult?.invoice) {
@@ -193,9 +193,9 @@ export default function App() {
               if (batchResult.invoice.tax_total) result.invoice.tax_total = batchResult.invoice.tax_total;
             }
           } catch (e) {
-            // Fallback: process this batch page-by-page
+            // Fallback: process this batch page-by-page with index mode
             for (let p = 0; p < batch.length; p++) {
-              try { const pr = await parseInvoicePageAI(batch[p].base64, batch[p].fileType, 'items_only', startPage + p); if (pr?.items?.length) allItems = [...allItems, ...pr.items]; } catch {}
+              try { const pr = await parseInvoicePageAI(batch[p].base64, batch[p].fileType, 'index', startPage + p); if (pr?.items?.length) allItems = [...allItems, ...pr.items]; } catch {}
             }
           }
         }
