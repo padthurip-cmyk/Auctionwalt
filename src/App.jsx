@@ -158,12 +158,31 @@ export default function App() {
         if (!result?.invoice || !result?.items?.length) { setUploadBusy(false); if (fileRef.current) fileRef.current.value = ''; notify('err', 'Could not extract items. Try splitting into page photos.'); return; }
         allItems = result.items;
       } else {
-        // Send ALL pages to AI at once — it sees the entire invoice
+        // Try all pages at once first, fall back to page-by-page if it fails
+        let allAtOnceFailed = false;
         notify('info', `Reading ${pages.length} pages...`);
         try { result = await parseInvoiceAllPages(pages); }
-        catch (apiErr) { setUploadBusy(false); if (fileRef.current) fileRef.current.value = ''; notify('err', `Failed: ${apiErr.message}`); return; }
-        if (!result?.invoice || !result?.items?.length) { setUploadBusy(false); if (fileRef.current) fileRef.current.value = ''; notify('err', 'Could not extract items.'); return; }
-        allItems = result.items;
+        catch (apiErr) { allAtOnceFailed = true; notify('info', 'Switching to page-by-page...'); }
+        if (!allAtOnceFailed && (!result?.invoice || !result?.items?.length)) allAtOnceFailed = true;
+
+        if (allAtOnceFailed) {
+          // Page-by-page fallback
+          result = null;
+          notify('info', `Page 1 of ${pages.length}...`);
+          try { result = await parseInvoicePageAI(pages[0].base64, pages[0].fileType, 'full', 1); } catch (e) {}
+          if (!result?.invoice) { setUploadBusy(false); if (fileRef.current) fileRef.current.value = ''; notify('err', 'Could not read invoice header from page 1.'); return; }
+          allItems = [...(result.items || [])];
+          for (let i = 1; i < pages.length; i++) {
+            notify('info', `Page ${i+1} of ${pages.length}... (${allItems.length} items)`);
+            try { const pr = await parseInvoicePageAI(pages[i].base64, pages[i].fileType, 'items_only', i+1); if (pr?.items?.length) allItems = [...allItems, ...pr.items]; } catch {}
+            // Also try summary on last 2 pages
+            if (i >= pages.length - 2) { try { const sr = await parseInvoicePageAI(pages[i].base64, pages[i].fileType, 'summary', i+1); if (sr?.summary) { if (!result.invoice.buyer_premium_rate && sr.summary.premium_rate) result.invoice.buyer_premium_rate = sr.summary.premium_rate; if (!result.invoice.grand_total && sr.summary.grand_total) result.invoice.grand_total = sr.summary.grand_total; if (sr.summary.handling_fee_total) result.invoice.handling_fee_total = sr.summary.handling_fee_total; if (sr.summary.tax_total) result.invoice.tax_total = sr.summary.tax_total; if (sr.summary.lot_total) result.invoice.lot_total = sr.summary.lot_total; if (sr.summary.premium_total) result.invoice.premium_total = sr.summary.premium_total; } } catch {} }
+          }
+          if (!allItems.length) { setUploadBusy(false); if (fileRef.current) fileRef.current.value = ''; notify('err', 'No items found.'); return; }
+          result.items = allItems;
+        } else {
+          allItems = result.items;
+        }
       }
 
       const ri = result.invoice;
