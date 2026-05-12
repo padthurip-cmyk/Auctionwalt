@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import * as db from './utils/db';
-import { parseInvoiceAI, parseInvoicePageAI, generateReceiptAI, generateBillAI, extractListing, sendEmailFallback } from './utils/api';
+import { parseInvoiceAI, parseInvoicePageAI, parseInvoiceAllPages, generateReceiptAI, generateBillAI, extractListing, sendEmailFallback } from './utils/api';
 import { uid, fmt, fmtDate, fmtTs, readFileAsBase64, openWhatsApp, openSMS, printHTML, buildReceiptText } from './utils/helpers';
 
 const TABS = [
@@ -138,56 +138,18 @@ export default function App() {
         if (!result?.invoice || !result?.items?.length) { setUploadBusy(false); if (fileRef.current) fileRef.current.value = ''; notify('err', 'Could not extract items. Try splitting into page photos.'); return; }
         allItems = result.items;
       } else {
-        // Page 1: full mode
-        notify('info', `Processing page 1 of ${pages.length}...`);
-        try { result = await parseInvoicePageAI(pages[0].base64, pages[0].fileType, 'full', 1); }
-        catch (apiErr) { setUploadBusy(false); if (fileRef.current) fileRef.current.value = ''; notify('err', `Page 1 failed: ${apiErr.message}`); return; }
-        if (!result?.invoice) { setUploadBusy(false); if (fileRef.current) fileRef.current.value = ''; notify('err', 'Could not read invoice header.'); return; }
-        allItems = [...(result.items || [])];
-        // Middle pages (NOT the last 2): items_only
-        const stopBefore = Math.max(1, pages.length - 2);
-        for (let i = 1; i < stopBefore; i++) {
-          notify('info', `Processing page ${i + 1} of ${pages.length}... (${allItems.length} items)`);
-          try { const pr = await parseInvoicePageAI(pages[i].base64, pages[i].fileType, 'items_only', i + 1); if (pr?.items?.length) allItems = [...allItems, ...pr.items]; }
-          catch (pe) { notify('err', `Page ${i + 1} failed — continuing`); }
-        }
-        // Second-to-last page: get BOTH items AND summary (it often has both)
-        if (pages.length >= 3) {
-          const p2l = pages.length - 2;
-          notify('info', `Processing page ${p2l + 1} of ${pages.length}... (${allItems.length} items)`);
-          try { const pr = await parseInvoicePageAI(pages[p2l].base64, pages[p2l].fileType, 'items_only', p2l + 1); if (pr?.items?.length) allItems = [...allItems, ...pr.items]; } catch (pe) {}
-          try { const sr = await parseInvoicePageAI(pages[p2l].base64, pages[p2l].fileType, 'summary', p2l + 1); if (sr?.summary?.grand_total > 0) summaryData = sr.summary; } catch (pe) {}
-        }
-        // Last page: try summary, then items
-        if (pages.length > 1) {
-          notify('info', `Processing page ${pages.length} of ${pages.length}... (${allItems.length} items)`);
-          try {
-            const lastResult = await parseInvoicePageAI(pages[pages.length - 1].base64, pages[pages.length - 1].fileType, 'summary', pages.length);
-            if (lastResult?.summary) {
-              // Merge: prefer the page with more detail
-              if (!summaryData) { summaryData = lastResult.summary; }
-              else {
-                // If last page has grand_total but second-to-last has premium_rate, merge both
-                if (lastResult.summary.grand_total > 0 && (!summaryData.grand_total || lastResult.summary.grand_total > summaryData.grand_total)) summaryData.grand_total = lastResult.summary.grand_total;
-                if (lastResult.summary.premium_rate > 0 && !summaryData.premium_rate) summaryData.premium_rate = lastResult.summary.premium_rate;
-                if (lastResult.summary.premium_total > 0 && !summaryData.premium_total) summaryData.premium_total = lastResult.summary.premium_total;
-                if (lastResult.summary.handling_fee_total > 0 && !summaryData.handling_fee_total) summaryData.handling_fee_total = lastResult.summary.handling_fee_total;
-                if (lastResult.summary.tax_total > 0 && !summaryData.tax_total) summaryData.tax_total = lastResult.summary.tax_total;
-              }
-            }
-            // Also check for items on last page
-            const ir = await parseInvoicePageAI(pages[pages.length - 1].base64, pages[pages.length - 1].fileType, 'items_only', pages.length);
-            if (ir?.items?.length) allItems = [...allItems, ...ir.items];
-          } catch (pe) { notify('err', 'Last page failed — continuing'); }
-        }
-        if (!allItems.length) { setUploadBusy(false); if (fileRef.current) fileRef.current.value = ''; notify('err', 'No items found.'); return; }
-        result.items = allItems;
+        // Send ALL pages to AI at once — it sees the entire invoice
+        notify('info', `Reading ${pages.length} pages...`);
+        try { result = await parseInvoiceAllPages(pages); }
+        catch (apiErr) { setUploadBusy(false); if (fileRef.current) fileRef.current.value = ''; notify('err', `Failed: ${apiErr.message}`); return; }
+        if (!result?.invoice || !result?.items?.length) { setUploadBusy(false); if (fileRef.current) fileRef.current.value = ''; notify('err', 'Could not extract items.'); return; }
+        allItems = result.items;
       }
 
       const ri = result.invoice;
-      // ── Get rates from summary page or invoice header — each invoice is unique ──
-      const premiumRate = parseFloat(summaryData?.premium_rate) || parseFloat(ri.buyer_premium_rate) || 0;
-      const taxRate = parseFloat(ri.tax_rate) || (summaryData?.tax_total && summaryData?.lot_total ? +(parseFloat(summaryData.tax_total) / (parseFloat(summaryData.lot_total) + parseFloat(summaryData.premium_total || 0) + parseFloat(summaryData.handling_fee_total || 0))).toFixed(4) : 0.13);
+      // ── Get rates from invoice — each invoice is unique ──
+      const premiumRate = parseFloat(ri.buyer_premium_rate) || 0;
+      const taxRate = parseFloat(ri.tax_rate) || 0.13;
 
       // ── Calculate each item individually — no grand total distribution ──
       let lotTotal = 0, premiumTotal = 0, handlingTotal = 0, taxTotal = 0, grandTotal = 0;
